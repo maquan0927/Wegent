@@ -136,7 +136,6 @@ show_docker_install_instructions() {
     echo -e "${YELLOW}Then re-run this script.${NC}"
     echo ""
     exit 1
-    exit 1
 }
 
 # Check if Node.js and npm are installed
