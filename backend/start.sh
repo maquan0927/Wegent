@@ -299,11 +299,6 @@ if [ -d "venv" ]; then
     echo -e "${YELLOW}Removing old venv directory...${NC}"
     rm -rf venv
 fi
-# PYTHON_EXEC is already set in Step 1, use it directly
-# If not specified by user, try to get the real Python path (not pyenv shim)
-if [ -z "$PYTHON_PATH" ] && command -v pyenv &> /dev/null; then
-    PYTHON_EXEC=$(pyenv which python 2>/dev/null || echo "$PYTHON_EXEC")
-fi
 
 # Create virtual environment with uv if it doesn't exist
 if [ ! -d ".venv" ]; then

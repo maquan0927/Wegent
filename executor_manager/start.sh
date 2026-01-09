@@ -217,7 +217,7 @@ else
         PYTHON_CANDIDATE=$(which python)
         if check_python_version "$PYTHON_CANDIDATE" false; then
             PYTHON_EXEC="$PYTHON_CANDIDATE"
-            echo -e "${GREEN}✓ Using system Python: $PYTHON_EXEC${NC}, Trying Python3"
+            echo -e "${GREEN}✓ Using system Python: $PYTHON_EXEC${NC}"
         fi
     fi
     
