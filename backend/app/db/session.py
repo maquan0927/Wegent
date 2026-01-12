@@ -12,13 +12,14 @@ from app.core.config import settings
 SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
 # Create sync database engine with timezone configuration
-# Pool settings optimized for multi-worker deployments:
-# - pool_recycle: Recycle connections before MySQL's wait_timeout (default 8h)
-# - pool_pre_ping: Check connection validity before use
+# Pool settings are configurable via environment variables for multi-worker deployments
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     pool_pre_ping=True,
-    pool_recycle=3600,  # Recycle connections every hour to avoid MySQL timeout
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_recycle=settings.DB_POOL_RECYCLE,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
     connect_args={"charset": "utf8mb4", "init_command": "SET time_zone = '+08:00'"},
 )
 
