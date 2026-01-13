@@ -8,9 +8,11 @@ Responsible for creating knowledge base search tools and enhancing system prompt
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.utils.prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,12 @@ async def prepare_knowledge_base_tools(
         if task_id:
             kb_meta_prompt = await _build_historical_kb_meta_prompt(db, task_id)
             if kb_meta_prompt:
-                enhanced_system_prompt = f"{base_system_prompt}{kb_meta_prompt}"
+                enhanced_system_prompt = (
+                    PromptBuilder()
+                    .base(base_system_prompt)
+                    .append(kb_meta_prompt)
+                    .build()
+                )
         return extra_tools, enhanced_system_prompt
 
     logger.info(
@@ -89,12 +96,12 @@ async def prepare_knowledge_base_tools(
     extra_tools.append(kb_tool)
 
     # Import shared prompt constants from chat_shell prompts module
-    from chat_shell.prompts import KB_PROMPT_RELAXED, KB_PROMPT_STRICT
+    from chat_shell.prompts import KB_PROMPT_RELAXED
 
     # Choose prompt based on whether KB is user-selected or inherited from task
     if is_user_selected:
         # Strict mode: User explicitly selected KB for this message
-        kb_instruction = KB_PROMPT_STRICT
+        kb_instruction = ""
         logger.info(
             "[knowledge_factory] Using STRICT mode prompt (user explicitly selected KB)"
         )
@@ -105,13 +112,20 @@ async def prepare_knowledge_base_tools(
             "[knowledge_factory] Using RELAXED mode prompt (KB inherited from task)"
         )
 
-    enhanced_system_prompt = f"{base_system_prompt}{kb_instruction}"
+    enhanced_system_prompt = (
+        PromptBuilder().base(base_system_prompt).append(kb_instruction).build()
+    )
 
     # Add historical knowledge base meta info if available
     if task_id:
         kb_meta_prompt = await _build_historical_kb_meta_prompt(db, task_id)
         if kb_meta_prompt:
-            enhanced_system_prompt = f"{enhanced_system_prompt}{kb_meta_prompt}"
+            enhanced_system_prompt = (
+                PromptBuilder()
+                .base(enhanced_system_prompt)
+                .append(kb_meta_prompt)
+                .build()
+            )
 
     return extra_tools, enhanced_system_prompt
 
