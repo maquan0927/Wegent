@@ -27,12 +27,16 @@ class ChatSessionSetup(NamedTuple):
 
     task: TaskResource
     task_id: int
+    user_subtask: Subtask  # User message subtask (for history exclusion)
     assistant_subtask: Subtask
     existing_subtasks: List[Subtask]
     model_config: Any
     system_prompt: str
     bot_name: str  # First bot's name for MCP loading
     bot_namespace: str  # First bot's namespace for MCP loading
+    preload_skills: List[str]  # Preload skills from ChatConfig
+    skill_names: List[str]  # Available skill names from ChatConfig
+    skill_configs: List[Dict[str, Any]]  # Full skill configurations from ChatConfig
 
 
 def setup_chat_session(
@@ -72,6 +76,7 @@ def setup_chat_session(
     )
 
     enable_deep_thinking = tool_settings.get("enable_deep_thinking", False)
+    preload_skills = tool_settings.get("preload_skills", [])
     try:
         chat_config = config_builder.build(
             override_model_name=model_info.get("model_id"),
@@ -79,6 +84,7 @@ def setup_chat_session(
             enable_clarification=False,
             enable_deep_thinking=enable_deep_thinking,
             task_id=task_id or 0,
+            preload_skills=preload_skills,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -291,12 +297,16 @@ def setup_chat_session(
     return ChatSessionSetup(
         task=task,
         task_id=task_id,
+        user_subtask=user_subtask,
         assistant_subtask=assistant_subtask,
         existing_subtasks=existing_subtasks,
         model_config=model_config,
         system_prompt=system_prompt,
         bot_name=first_bot_name,
         bot_namespace=first_bot_namespace,
+        preload_skills=chat_config.preload_skills,
+        skill_names=chat_config.skill_names,
+        skill_configs=chat_config.skill_configs,
     )
 
 

@@ -13,6 +13,7 @@ This module provides a simplified LangGraph agent implementation using:
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
 
@@ -23,6 +24,8 @@ from langchain_core.tools.base import BaseTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
+from opentelemetry import trace as otel_trace
+from shared.telemetry.decorators import add_span_event, trace_sync
 
 from ..tools.base import ToolRegistry
 
@@ -43,7 +46,6 @@ class LangGraphAgentBuilder:
         tool_registry: ToolRegistry | None = None,
         max_iterations: int = 10,
         enable_checkpointing: bool = False,
-        load_skill_tool: Any | None = None,
     ):
         """Initialize agent builder.
 
@@ -52,49 +54,73 @@ class LangGraphAgentBuilder:
             tool_registry: Registry of available tools (optional)
             max_iterations: Maximum tool loop iterations
             enable_checkpointing: Enable state checkpointing for resumability
-            load_skill_tool: Optional LoadSkillTool instance for dynamic skill prompt injection
         """
         self.llm = llm
         self.tool_registry = tool_registry
         self.max_iterations = max_iterations
         self.enable_checkpointing = enable_checkpointing
         self._agent = None
-        self._load_skill_tool = load_skill_tool
 
         # Get all LangChain tools from registry
         self.tools: list[BaseTool] = []
         if self.tool_registry:
             self.tools = self.tool_registry.get_all()
 
-    def _create_prompt_modifier(self) -> Callable | None:
-        """Create a prompt modifier function for dynamic skill prompt injection.
+        # Automatically detect PromptModifierTool instances from registered tools
+        self._prompt_modifier_tools = self._find_prompt_modifier_tools()
 
-        This function is called before each model invocation to inject loaded skill
-        prompts into the messages.
+    def _find_prompt_modifier_tools(self) -> list[Any]:
+        """Find all tools that implement the PromptModifierTool protocol.
 
         Returns:
-            A callable that modifies the messages, or None if no load_skill_tool
+            List of tools that have get_prompt_modification method
         """
-        if not self._load_skill_tool:
+        from ..tools.base import PromptModifierTool
+
+        modifier_tools = []
+        for tool in self.tools:
+            if isinstance(tool, PromptModifierTool):
+                modifier_tools.append(tool)
+                logger.debug(
+                    "[LangGraphAgentBuilder] Found PromptModifierTool: %s",
+                    tool.name,
+                )
+        return modifier_tools
+
+    def _create_prompt_modifier(self) -> Callable | None:
+        """Create a prompt modifier function for dynamic prompt injection.
+
+        This function is called before each model invocation to inject
+        prompt modifications from all PromptModifierTool instances.
+
+        Returns:
+            A callable that modifies the messages, or None if no modifier tools
+        """
+        if not self._prompt_modifier_tools:
             return None
 
-        load_skill_tool = self._load_skill_tool
+        modifier_tools = self._prompt_modifier_tools
 
         def prompt_modifier(state: dict[str, Any]) -> list[BaseMessage]:
-            """Modify messages to inject loaded skill prompts into system message.
+            """Modify messages to inject prompt modifications into system message.
 
             This function is called by LangGraph's create_react_agent before each
-            model invocation. It returns the modified messages list.
+            model invocation. It collects prompt modifications from all
+            PromptModifierTool instances and appends them to the system message.
             """
             messages = state.get("messages", [])
             if not messages:
                 return messages
 
-            # Get combined skill prompt from the tool
-            skill_prompt = load_skill_tool.get_combined_skill_prompt()
+            # Collect prompt modifications from all modifier tools
+            combined_modification = ""
+            for tool in modifier_tools:
+                modification = tool.get_prompt_modification()
+                if modification:
+                    combined_modification += modification
 
-            if not skill_prompt:
-                # No skills loaded, return messages unchanged
+            if not combined_modification:
+                # No modifications, return messages unchanged
                 return messages
 
             # Find and update the system message
@@ -103,41 +129,60 @@ class LangGraphAgentBuilder:
 
             for msg in messages:
                 if isinstance(msg, SystemMessage) and not system_updated:
-                    # Append skill prompt to existing system message
+                    # Append modifications to existing system message
                     original_content = (
                         msg.content
                         if isinstance(msg.content, str)
                         else str(msg.content)
                     )
-                    updated_content = original_content + skill_prompt
+                    updated_content = original_content + combined_modification
                     new_messages.append(SystemMessage(content=updated_content))
                     system_updated = True
 
                 else:
                     new_messages.append(msg)
 
-            # If no system message found, prepend one with skill prompt
+            # If no system message found, prepend one with modifications
             if not system_updated:
-                new_messages.insert(0, SystemMessage(content=skill_prompt))
+                new_messages.insert(0, SystemMessage(content=combined_modification))
                 logger.debug(
-                    "[prompt_modifier] Created new system message with skill prompts, len=%d",
-                    len(skill_prompt),
+                    "[prompt_modifier] Created new system message with modifications, len=%d",
+                    len(combined_modification),
                 )
 
             return new_messages
 
         return prompt_modifier
 
+    @trace_sync(
+        span_name="agent_builder.build_agent",
+        tracer_name="chat_shell.agents",
+        extract_attributes=lambda self, *args, **kwargs: {
+            "agent.tools_count": len(self.tools),
+            "agent.max_iterations": self.max_iterations,
+            "agent.enable_checkpointing": self.enable_checkpointing,
+        },
+    )
     def _build_agent(self):
         """Build the LangGraph ReAct agent lazily."""
         if self._agent is not None:
+            add_span_event("agent_already_built")
             return self._agent
+
+        add_span_event("building_new_agent")
 
         # Use LangGraph's prebuilt create_react_agent
         checkpointer = MemorySaver() if self.enable_checkpointing else None
+        add_span_event(
+            "checkpointer_created", {"has_checkpointer": checkpointer is not None}
+        )
 
         # Create prompt modifier for dynamic skill prompt injection
         prompt_modifier = self._create_prompt_modifier()
+        add_span_event(
+            "prompt_modifier_created",
+            {"has_modifier": prompt_modifier is not None},
+        )
 
         # Build agent with optional prompt modifier for dynamic system prompt updates
         self._agent = create_react_agent(
@@ -146,6 +191,7 @@ class LangGraphAgentBuilder:
             checkpointer=checkpointer,
             prompt=prompt_modifier,
         )
+        add_span_event("react_agent_created")
 
         return self._agent
 
@@ -239,8 +285,17 @@ class LangGraphAgentBuilder:
         Yields:
             Content tokens as they are generated
         """
+        add_span_event("stream_tokens_started", {"message_count": len(messages)})
+
+        add_span_event("building_agent_started")
         agent = self._build_agent()
+        add_span_event("building_agent_completed")
+
+        add_span_event("convert_to_messages_started", {"message_count": len(messages)})
         lc_messages = convert_to_messages(messages)
+        add_span_event(
+            "convert_to_messages_completed", {"lc_message_count": len(lc_messages)}
+        )
 
         exec_config = {"configurable": config} if config else None
 
@@ -248,6 +303,15 @@ class LangGraphAgentBuilder:
         streamed_content = False  # Track if we've streamed any content
         final_content = ""  # Store final content for non-streaming fallback
 
+        # TTFT tracking variables
+        first_token_received = False
+        llm_request_start_time: float | None = None
+        ttft_ms: float | None = None  # Time to first token in milliseconds
+
+        # Get tracer for LLM request span
+        tracer = otel_trace.get_tracer("chat_shell.agents")
+
+        add_span_event("astream_events_starting")
         try:
             async for event in agent.astream_events(
                 {"messages": lc_messages},
@@ -266,8 +330,30 @@ class LangGraphAgentBuilder:
                 # Handle token streaming events
                 kind = event.get("event", "")
 
+                # Track LLM request start
+                if kind == "on_chat_model_start":
+                    llm_request_start_time = time.perf_counter()
+                    first_token_received = False
+                    add_span_event(
+                        "llm_request_started",
+                        {"model_name": event.get("name", "unknown")},
+                    )
+
                 # Log streaming completion event (much less verbose)
                 if kind == "on_chat_model_stream":
+                    # Calculate TTFT on first token
+                    if not first_token_received and llm_request_start_time is not None:
+                        ttft_ms = (time.perf_counter() - llm_request_start_time) * 1000
+                        first_token_received = True
+                        add_span_event(
+                            "first_token_received",
+                            {"ttft_ms": round(ttft_ms, 2)},
+                        )
+                        logger.info(
+                            "[stream_tokens] TTFT: %.2fms",
+                            ttft_ms,
+                        )
+
                     data = event.get("data", {})
                     chunk = data.get("chunk")
 
@@ -352,6 +438,27 @@ class LangGraphAgentBuilder:
                         # Log empty content case
                         else:
                             logger.debug("[stream_tokens] Empty content in chunk")
+
+                elif kind == "on_chat_model_end":
+                    # Track LLM request completion
+                    if llm_request_start_time is not None:
+                        total_llm_time_ms = (
+                            time.perf_counter() - llm_request_start_time
+                        ) * 1000
+                        add_span_event(
+                            "llm_request_completed",
+                            {
+                                "total_time_ms": round(total_llm_time_ms, 2),
+                                "ttft_ms": round(ttft_ms, 2) if ttft_ms else None,
+                            },
+                        )
+                        logger.info(
+                            "[stream_tokens] LLM request completed: total=%.2fms, ttft=%.2fms",
+                            total_llm_time_ms,
+                            ttft_ms or 0,
+                        )
+                        # Reset for potential next LLM call (e.g., after tool execution)
+                        llm_request_start_time = None
 
                 elif kind == "on_chain_end" and event.get("name") == "LangGraph":
                     # Extract final content from the top-level LangGraph chain end

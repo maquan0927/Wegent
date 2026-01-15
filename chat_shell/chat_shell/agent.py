@@ -21,6 +21,11 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from langchain_core.tools.base import BaseTool
+from shared.telemetry.decorators import (
+    add_span_event,
+    trace_async_generator,
+    trace_sync,
+)
 
 from chat_shell.core.config import settings
 
@@ -40,18 +45,21 @@ class AgentConfig:
 
     This dataclass holds all the parameters needed to create and configure
     a chat agent, keeping the creation logic clean and type-safe.
+
+    Note: Tools that implement PromptModifierTool protocol (e.g., LoadSkillTool)
+    should be included in extra_tools. The LangGraphAgentBuilder will automatically
+    detect and use them for dynamic prompt modification.
     """
 
     model_config: dict[str, Any]
     system_prompt: str = ""
     max_iterations: int = 10  # Default, can be overridden by settings
     extra_tools: list[BaseTool] | None = None
-    load_skill_tool: Any = None
     streaming: bool = True
     # Prompt enhancement options (handled internally by ChatAgent)
     enable_clarification: bool = False
     enable_deep_thinking: bool = True
-    skills: list[dict[str, Any]] | None = None  # Skill metadata for prompt injection
+    skills: list[dict[str, Any]] | None = None  # All skill configs (with preload field)
 
 
 class ChatAgent:
@@ -111,6 +119,18 @@ class ChatAgent:
                 WebSearchTool(default_max_results=default_max_results)
             )
 
+    @trace_sync(
+        span_name="chat_agent.create_agent_builder",
+        tracer_name="chat_shell.agent",
+        extract_attributes=lambda self, config, *args, **kwargs: {
+            "agent.model_id": config.model_config.get("model_id", "unknown"),
+            "agent.extra_tools_count": (
+                len(config.extra_tools) if config.extra_tools else 0
+            ),
+            "agent.max_iterations": config.max_iterations,
+            "agent.streaming": config.streaming,
+        },
+    )
     def create_agent_builder(self, config: AgentConfig) -> LangGraphAgentBuilder:
         """Create a LangGraph agent builder with the given configuration.
 
@@ -121,30 +141,40 @@ class ChatAgent:
             Configured LangGraphAgentBuilder instance
         """
         # Create LangChain model from config with streaming enabled
+        add_span_event("creating_llm_started")
         llm = LangChainModelFactory.create_from_config(
             config.model_config, streaming=config.streaming
         )
+        add_span_event("creating_llm_completed")
 
         # Create a temporary registry with extra tools
+        add_span_event("creating_tool_registry")
         tool_registry = ToolRegistry()
 
         # Copy existing tools
         for tool in self.tool_registry.get_all():
             tool_registry.register(tool)
 
-        # Add extra tools
+        # Add extra tools (including PromptModifierTool instances like LoadSkillTool)
+        # LangGraphAgentBuilder will automatically detect PromptModifierTool instances
         if config.extra_tools:
             for tool in config.extra_tools:
                 tool_registry.register(tool)
+        add_span_event(
+            "tool_registry_built",
+            {"total_tools": len(tool_registry.get_all())},
+        )
 
-        # Create agent builder with load_skill_tool for dynamic skill prompt injection
-        return LangGraphAgentBuilder(
+        # Create agent builder - it will auto-detect PromptModifierTool from registry
+        add_span_event("creating_langgraph_agent_builder")
+        builder = LangGraphAgentBuilder(
             llm=llm,
             tool_registry=tool_registry,
             max_iterations=config.max_iterations,
             enable_checkpointing=self.enable_checkpointing,
-            load_skill_tool=config.load_skill_tool,
         )
+        add_span_event("langgraph_agent_builder_created")
+        return builder
 
     async def execute(
         self,
@@ -178,12 +208,21 @@ class ChatAgent:
             "iterations": final_state.get("iteration", 0),
         }
 
+    @trace_async_generator(
+        span_name="chat_agent.stream",
+        tracer_name="chat_shell.agent",
+        extract_attributes=lambda self, messages, config, *args, **kwargs: {
+            "stream.message_count": len(messages),
+            "stream.model_id": config.model_config.get("model_id", "unknown"),
+        },
+    )
     async def stream(
         self,
         messages: list[dict[str, Any]],
         config: AgentConfig,
         cancel_event: asyncio.Event | None = None,
         on_tool_event: Callable[[str, dict], None] | None = None,
+        agent_builder: LangGraphAgentBuilder | None = None,
     ):
         """Stream tokens from agent execution.
 
@@ -195,13 +234,20 @@ class ChatAgent:
             config: Agent configuration
             cancel_event: Optional cancellation event
             on_tool_event: Optional callback for tool events (kind, event_data)
+            agent_builder: Optional pre-created agent builder to reuse (avoids duplicate creation)
 
         Yields:
             Tokens from the agent
         """
-        agent = self.create_agent_builder(config)
+        if agent_builder is None:
+            add_span_event("stream_creating_agent_builder")
+            agent_builder = self.create_agent_builder(config)
+            add_span_event("stream_agent_builder_created")
+        else:
+            add_span_event("stream_reusing_agent_builder")
 
-        async for token in agent.stream_tokens(
+        add_span_event("stream_tokens_starting")
+        async for token in agent_builder.stream_tokens(
             messages,
             cancel_event=cancel_event,
             on_tool_event=on_tool_event,

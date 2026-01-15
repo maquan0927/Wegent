@@ -108,8 +108,16 @@ class StreamingState:
         include_value: bool = True,
         include_thinking: bool = True,
         slim_thinking: bool = False,
+        include_sources: bool = True,
     ) -> dict:
-        """Get current result with thinking steps and sources."""
+        """Get current result with thinking steps and sources.
+
+        Args:
+            include_value: Include the full response value
+            include_thinking: Include thinking steps (tool calls)
+            slim_thinking: Use slimmed down thinking data (for Chat mode)
+            include_sources: Include knowledge base sources (independent of thinking)
+        """
         result: dict = {"shell_type": self.shell_type}
         if include_value:
             result["value"] = self.full_response
@@ -119,8 +127,10 @@ class StreamingState:
                     result["thinking"] = self._slim_thinking_data(self.thinking)
                 else:
                     result["thinking"] = self.thinking
-            if self.sources:
-                result["sources"] = self.sources
+        # Sources should be included independently of thinking steps
+        # This ensures knowledge base citations are always available
+        if include_sources and self.sources:
+            result["sources"] = self.sources
         if self.reasoning_content:
             result["reasoning_content"] = self.reasoning_content
         return result
@@ -309,17 +319,6 @@ class StreamingCore:
 
         # Regular content
         self.state.append_content(token)
-
-        # Log each chunk content for debugging
-        logger.info(
-            "[CHAT_SHELL_CHUNK] subtask_id=%d, task_id=%d, offset=%d, "
-            "token_len=%d, content=%s",
-            self.state.subtask_id,
-            self.state.task_id,
-            self.state.offset - len(token),
-            len(token),
-            repr(token[:100]) if len(token) > 100 else repr(token),
-        )
 
         is_chat_mode = self.state.shell_type == "Chat"
         result = self.state.get_current_result(

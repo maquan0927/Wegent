@@ -19,6 +19,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from shared.telemetry.decorators import add_span_event, trace_sync
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,14 @@ class LangChainModelFactory:
                 ),
                 # Enable Responses API when api_format is "responses"
                 "use_responses_api": cfg.get("api_format") == "responses" or None,
+                # Include reasoning.encrypted_content for Responses API to properly handle
+                # multi-turn conversations with reasoning models (e.g., GPT-5.x)
+                # Without this, the server returns "unrecognized reasoning ID" errors
+                "include": (
+                    ["reasoning.encrypted_content"]
+                    if cfg.get("api_format") == "responses"
+                    else None
+                ),
             },
         },
         "anthropic": {
@@ -115,7 +124,6 @@ class LangChainModelFactory:
                 "model_kwargs": {
                     "extra_headers": {
                         **(cfg.get("default_headers") or {}),
-                        "anthropic-beta": "prompt-caching-2024-07-31",
                     }
                 },
             },
@@ -141,6 +149,15 @@ class LangChainModelFactory:
     }
 
     @classmethod
+    @trace_sync(
+        span_name="model_factory.create_from_config",
+        tracer_name="chat_shell.models",
+        extract_attributes=lambda cls, model_config, **kwargs: {
+            "model.model_id": model_config.get("model_id", "unknown"),
+            "model.provider": model_config.get("model", "openai"),
+            "model.streaming": kwargs.get("streaming", False),
+        },
+    )
     def create_from_config(
         cls, model_config: dict[str, Any], **kwargs
     ) -> BaseChatModel:
@@ -161,6 +178,7 @@ class LangChainModelFactory:
             BaseChatModel instance ready for use with LangChain/LangGraph
         """
         # Extract config with defaults
+        add_span_event("extracting_config")
         cfg = {
             "model_id": model_config.get("model_id", "gpt-4"),
             "api_key": model_config.get("api_key", ""),
@@ -183,6 +201,7 @@ class LangChainModelFactory:
             api_format_log,
         )
 
+        add_span_event("detecting_provider")
         provider = _detect_provider(model_type, cfg["model_id"])
         provider_cfg = cls._PROVIDER_CONFIG.get(provider)
 
@@ -190,11 +209,17 @@ class LangChainModelFactory:
             raise ValueError(f"Unsupported model provider: {provider}")
 
         # Build params and create model instance
+        add_span_event("building_params", {"provider": provider})
         params = provider_cfg["params"](cfg, kwargs)
         # Filter out None values to use defaults
         params = {k: v for k, v in params.items() if v is not None}
 
-        return provider_cfg["class"](**params)
+        add_span_event(
+            "instantiating_model_class", {"class": provider_cfg["class"].__name__}
+        )
+        model = provider_cfg["class"](**params)
+        add_span_event("model_instance_created")
+        return model
 
     @classmethod
     def create_from_name(
