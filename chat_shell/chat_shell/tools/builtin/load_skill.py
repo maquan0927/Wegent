@@ -20,7 +20,7 @@ from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
-from shared.utils.prompt_builder import PromptBuilder
+from chat_shell.prompts.builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,7 @@ class LoadSkillTool(BaseTool):
 
         for skill_name, prompt in self._loaded_skill_prompts.items():
             builder.append_with_header(
-                f"\n\n### Skill: {skill_name}",
+                f"\n\n## Skill: {skill_name}",
                 prompt,
                 content_target_level=4,
             )
