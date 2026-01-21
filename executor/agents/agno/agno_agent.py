@@ -17,15 +17,15 @@ from agno.agent import RunEvent
 from agno.db.sqlite import SqliteDb
 from agno.team import Team
 from agno.team.team import TeamRunEvent
-from shared.logger import setup_logger
-from shared.models.task import ExecutionResult, ThinkingStep
-from shared.status import TaskStatus
-from shared.telemetry.decorators import add_span_event, trace_async
 
 from executor.agents.base import Agent
 from executor.config.config import DEBUG_RUN, EXECUTOR_ENV
 from executor.tasks.resource_manager import ResourceManager
 from executor.tasks.task_state_manager import TaskState, TaskStateManager
+from shared.logger import setup_logger
+from shared.models.task import ExecutionResult, ThinkingStep
+from shared.status import TaskStatus
+from shared.telemetry.decorators import add_span_event, trace_async
 
 from .config_utils import ConfigManager
 from .mcp_manager import MCPManager
@@ -99,6 +99,10 @@ class AgnoAgent(Agent):
         # Streaming throttle control - avoid sending too many HTTP callbacks
         self._last_content_report_time: float = 0
         self._content_report_interval: float = 0.5  # Report at most every 500ms
+        self._last_thinking_report_time: float = 0
+        self._thinking_report_interval: float = (
+            0.3  # Report thinking at most every 300ms
+        )
 
         # Initialize thinking step manager first
         self.thinking_manager = ThinkingStepManager(
@@ -352,8 +356,10 @@ class AgnoAgent(Agent):
                 # Copy ContextVars before creating new event loop
                 # ContextVars don't automatically propagate to new event loops
                 try:
-                    from shared.telemetry.context import (copy_context_vars,
-                                                          restore_context_vars)
+                    from shared.telemetry.context import (
+                        copy_context_vars,
+                        restore_context_vars,
+                    )
 
                     saved_context = copy_context_vars()
                 except ImportError:
@@ -742,22 +748,29 @@ class AgnoAgent(Agent):
                 }
                 self.add_thinking_step_by_key(
                     title_key="thinking.model_reasoning",
-                    report_immediately=True,
+                    report_immediately=False,  # Don't report immediately, use throttle below
                     details=reasoning_details,
                 )
-                # IMPORTANT: Also send accumulated reasoning_content in the result
-                # This enables streaming display of reasoning during the thinking phase
-                # (before content generation starts)
-                self.report_progress(
-                    70,  # Keep progress at 70 during reasoning phase
-                    TaskStatus.RUNNING.value,
-                    "${{thinking.model_reasoning}}",
-                    result=ExecutionResult(
-                        value=result_content,  # May be empty during reasoning phase
-                        thinking=self.thinking_manager.get_thinking_steps(),
-                        reasoning_content=self.accumulated_reasoning_content,
-                    ).dict(),
+                # Throttled report progress - only send if enough time has passed
+                current_time = time.time()
+                time_since_last_thinking = (
+                    current_time - self._last_thinking_report_time
                 )
+                if time_since_last_thinking >= self._thinking_report_interval:
+                    self._last_thinking_report_time = current_time
+                    logger.info(
+                        f"Sending thinking update, thinking_count={len(self.thinking_manager.get_thinking_steps())}"
+                    )
+                    self.report_progress(
+                        70,  # Keep progress at 70 during reasoning phase
+                        TaskStatus.RUNNING.value,
+                        "${{thinking.model_reasoning}}",
+                        result=ExecutionResult(
+                            value=result_content,  # May be empty during reasoning phase
+                            thinking=self.thinking_manager.get_thinking_steps(),
+                            reasoning_content=self.accumulated_reasoning_content,
+                        ).dict(),
+                    )
 
         # Handle reasoning step events (for models that support structured reasoning)
         if run_response_event.event in [RunEvent.reasoning_step]:
@@ -774,21 +787,29 @@ class AgnoAgent(Agent):
                 }
                 self.add_thinking_step_by_key(
                     title_key="thinking.model_reasoning",
-                    report_immediately=True,
+                    report_immediately=False,  # Don't report immediately, use throttle below
                     details=reasoning_details,
                 )
-                # IMPORTANT: Also send accumulated reasoning_content in the result
-                # This enables streaming display of reasoning during the thinking phase
-                self.report_progress(
-                    70,  # Keep progress at 70 during reasoning phase
-                    TaskStatus.RUNNING.value,
-                    "${{thinking.model_reasoning}}",
-                    result=ExecutionResult(
-                        value=result_content,  # May be empty during reasoning phase
-                        thinking=self.thinking_manager.get_thinking_steps(),
-                        reasoning_content=self.accumulated_reasoning_content,
-                    ).dict(),
+                # Throttled report progress - only send if enough time has passed
+                current_time = time.time()
+                time_since_last_thinking = (
+                    current_time - self._last_thinking_report_time
                 )
+                if time_since_last_thinking >= self._thinking_report_interval:
+                    self._last_thinking_report_time = current_time
+                    logger.info(
+                        f"Sending thinking update (reasoning_step), thinking_count={len(self.thinking_manager.get_thinking_steps())}"
+                    )
+                    self.report_progress(
+                        70,  # Keep progress at 70 during reasoning phase
+                        TaskStatus.RUNNING.value,
+                        "${{thinking.model_reasoning}}",
+                        result=ExecutionResult(
+                            value=result_content,  # May be empty during reasoning phase
+                            thinking=self.thinking_manager.get_thinking_steps(),
+                            reasoning_content=self.accumulated_reasoning_content,
+                        ).dict(),
+                    )
 
         return result_content
 
@@ -1313,9 +1334,29 @@ class AgnoAgent(Agent):
                 }
                 self.add_thinking_step_by_key(
                     title_key="thinking.model_reasoning",
-                    report_immediately=True,
+                    report_immediately=False,  # Don't report immediately, use throttle
                     details=reasoning_details,
                 )
+                # Throttled report progress - only send if enough time has passed
+                current_time = time.time()
+                time_since_last_thinking = (
+                    current_time - self._last_thinking_report_time
+                )
+                if time_since_last_thinking >= self._thinking_report_interval:
+                    self._last_thinking_report_time = current_time
+                    logger.info(
+                        f"[Team] Sending thinking update, thinking_count={len(self.thinking_manager.get_thinking_steps())}"
+                    )
+                    self.report_progress(
+                        70,  # Keep progress at 70 during reasoning phase
+                        TaskStatus.RUNNING.value,
+                        "${{thinking.model_reasoning}}",
+                        result=ExecutionResult(
+                            value=result_content,
+                            thinking=self.thinking_manager.get_thinking_steps(),
+                            reasoning_content=self.accumulated_reasoning_content,
+                        ).dict(),
+                    )
 
         return result_content, reasoning
 

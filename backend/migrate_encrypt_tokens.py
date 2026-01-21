@@ -15,12 +15,12 @@ from typing import List
 # Add parent directory to path to import app modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from shared.utils.crypto import encrypt_git_token, is_token_encrypted
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.models.user import User
+from shared.utils.crypto import encrypt_git_token, is_token_encrypted
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,9 +65,13 @@ def migrate_user_tokens(db: Session) -> int:
                 encrypted_token = encrypt_git_token(git_token)
                 git_item["git_token"] = encrypted_token
                 modified = True
-                logger.info(f"Encrypted token for user {user.user_name}, type: {git_item.get('type')}")
+                logger.info(
+                    f"Encrypted token for user {user.user_name}, type: {git_item.get('type')}"
+                )
             except Exception as e:
-                logger.error(f"Failed to encrypt token for user {user.user_name}: {str(e)}")
+                logger.error(
+                    f"Failed to encrypt token for user {user.user_name}: {str(e)}"
+                )
                 continue
 
         if modified:

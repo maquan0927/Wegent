@@ -14,19 +14,19 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import (BackgroundTasks, Body, FastAPI, HTTPException, Query,
-                     Request)
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
+
+from executor.services.agent_service import AgentService
+from executor.services.heartbeat_service import start_heartbeat, stop_heartbeat
+from executor.tasks import process, run_task
+
 # Import the shared logger
 from shared.logger import setup_logger
 from shared.status import TaskStatus
 from shared.telemetry.config import get_otel_config
 from shared.telemetry.context import set_task_context, set_user_context
 from shared.telemetry.core import is_telemetry_enabled
-
-from executor.services.agent_service import AgentService
-from executor.services.heartbeat_service import start_heartbeat, stop_heartbeat
-from executor.tasks import process, run_task
 
 # Use the shared logger setup function
 logger = setup_logger("task_executor")
@@ -38,6 +38,15 @@ async def lifespan(app: FastAPI):
     """
     Run task at startup if TASK_INFO is available
     """
+    # Ensure /home/user directory exists (for container compatibility)
+    try:
+        home_user_dir = "/home/user"
+        if not os.path.exists(home_user_dir):
+            os.makedirs(home_user_dir, mode=0o777, exist_ok=True)
+            logger.info(f"Created {home_user_dir} directory")
+    except Exception as e:
+        logger.warning(f"Failed to create {home_user_dir} directory: {e}")
+
     # Initialize OpenTelemetry if enabled (configuration from shared/telemetry/config.py)
     otel_config = get_otel_config("wegent-executor")
     if otel_config.enabled:
@@ -61,8 +70,9 @@ async def lifespan(app: FastAPI):
             logger.info("OpenTelemetry initialized successfully")
 
             # Apply instrumentation
-            from shared.telemetry.instrumentation import \
-                setup_opentelemetry_instrumentation
+            from shared.telemetry.instrumentation import (
+                setup_opentelemetry_instrumentation,
+            )
 
             setup_opentelemetry_instrumentation(app, logger)
 
@@ -122,6 +132,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Register envd Connect RPC routes (enabled by default)
+envd_enabled = os.getenv("ENVD_ENABLED", "true").lower() == "true"
+if envd_enabled:
+    try:
+        from executor.envd.server import register_envd_routes
+
+        register_envd_routes(app)
+        logger.info("envd Connect RPC routes registered to main app")
+    except Exception as e:
+        logger.warning(f"Failed to register envd routes: {e}")
+
 
 # Add middleware for request/response logging and OTEL capture
 @app.middleware("http")
@@ -140,8 +161,10 @@ async def log_requests(request: Request, call_next):
     start_time = time.time()
 
     # Always set request context for logging (works even without OTEL)
-    from shared.telemetry.context import (extract_trace_context_from_headers,
-                                          set_request_context)
+    from shared.telemetry.context import (
+        extract_trace_context_from_headers,
+        set_request_context,
+    )
 
     set_request_context(request_id)
 
@@ -187,6 +210,7 @@ async def log_requests(request: Request, call_next):
     if otel_cfg.enabled:
         try:
             from opentelemetry import trace
+
             from shared.telemetry.core import is_telemetry_enabled
 
             if is_telemetry_enabled():
@@ -210,6 +234,7 @@ async def log_requests(request: Request, call_next):
     if otel_cfg.enabled:
         try:
             from opentelemetry import trace
+
             from shared.telemetry.core import is_telemetry_enabled
 
             if is_telemetry_enabled():

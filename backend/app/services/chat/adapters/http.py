@@ -13,6 +13,7 @@ import logging
 from typing import AsyncIterator, Optional
 
 import httpx
+
 from shared.telemetry.context.propagation import inject_trace_context_to_headers
 
 from .interface import ChatEvent, ChatEventType, ChatInterface, ChatRequest
@@ -143,6 +144,8 @@ class HTTPAdapter(ChatInterface):
             "user_message_id": request.user_message_id,  # For history exclusion
             "bot_name": request.bot_name,
             "bot_namespace": request.bot_namespace,
+            # History limit for subscription tasks
+            "history_limit": request.history_limit,
             # Additional fields for HTTP mode
             "skill_names": request.skill_names,
             "skill_configs": request.skill_configs,
@@ -254,6 +257,9 @@ class HTTPAdapter(ChatInterface):
                                 logger.debug(
                                     "[HTTP_ADAPTER] Terminal event received, ending stream"
                                 )
+                                # Properly close the response before returning
+                                # to avoid "async generator ignored GeneratorExit" warning
+                                await response.aclose()
                                 return
 
             except httpx.TimeoutException as e:
@@ -338,6 +344,9 @@ class HTTPAdapter(ChatInterface):
                                 ChatEventType.ERROR,
                                 ChatEventType.CANCELLED,
                             ):
+                                # Properly close the response before returning
+                                # to avoid "async generator ignored GeneratorExit" warning
+                                await response.aclose()
                                 return
 
             except Exception as e:
