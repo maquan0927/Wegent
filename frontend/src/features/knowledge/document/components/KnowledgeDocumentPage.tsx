@@ -36,13 +36,20 @@ import { useKnowledgeBases } from '../hooks/useKnowledgeBases'
 import type { Group } from '@/types/group'
 import type { KnowledgeBase, KnowledgeBaseType } from '@/types/knowledge'
 
-type DocumentTabType = 'personal' | 'group' | 'external'
+export type DocumentTabType = 'personal' | 'group' | 'external'
 
 interface DocumentTab {
   id: DocumentTabType
   labelKey: string
   icon: React.ReactNode
   disabled?: boolean
+}
+
+export interface KnowledgeDocumentPageProps {
+  initialTab?: DocumentTabType
+  initialGroup?: string
+  onTabChange?: (tab: DocumentTabType) => void
+  onGroupChange?: (groupName: string | null) => void
 }
 
 const tabs: DocumentTab[] = [
@@ -64,10 +71,15 @@ const tabs: DocumentTab[] = [
   },
 ]
 
-export function KnowledgeDocumentPage() {
+export function KnowledgeDocumentPage({
+  initialTab = 'personal',
+  initialGroup,
+  onTabChange,
+  onGroupChange,
+}: KnowledgeDocumentPageProps) {
   const { t } = useTranslation()
   const router = useRouter()
-  const [activeTab, setActiveTab] = useState<DocumentTabType>('personal')
+  const [activeTab, setActiveTab] = useState<DocumentTabType>(initialTab)
   const [groups, setGroups] = useState<Group[]>([])
   const [loadingGroups, setLoadingGroups] = useState(true)
 
@@ -159,6 +171,26 @@ export function KnowledgeDocumentPage() {
     router.push(`/knowledge/document/${kb.id}`)
   }
 
+  // Handle tab change with parent notification
+  const handleTabChange = (tab: DocumentTabType) => {
+    setActiveTab(tab)
+    onTabChange?.(tab)
+    // Clear group when switching tabs
+    if (tab !== 'group') {
+      onGroupChange?.(null)
+    }
+  }
+
+  // Handle group selection with parent notification
+  const handleGroupSelect = (group: Group | null) => {
+    onGroupChange?.(group?.name ?? null)
+  }
+
+  // Handle back from group detail to group list
+  const handleBackFromGroupDetail = () => {
+    onGroupChange?.(null)
+  }
+
   return (
     <div className="space-y-4">
       {/* Tab navigation - left aligned */}
@@ -168,7 +200,7 @@ export function KnowledgeDocumentPage() {
           return (
             <button
               key={tab.id}
-              onClick={() => !tab.disabled && setActiveTab(tab.id)}
+              onClick={() => !tab.disabled && handleTabChange(tab.id)}
               disabled={tab.disabled}
               className={`
                 relative flex items-center gap-2 px-4 py-2 text-sm font-medium whitespace-nowrap rounded-md transition-colors duration-200
@@ -211,10 +243,13 @@ export function KnowledgeDocumentPage() {
             groups={groups}
             loadingGroups={loadingGroups}
             refreshKey={groupRefreshKey}
+            initialGroup={initialGroup}
             onSelectKb={handleSelectKb}
             onEditKb={setEditingKb}
             onDeleteKb={setDeletingKb}
             onCreateKb={(groupName, kbType) => handleCreateKb(groupName, kbType)}
+            onGroupSelect={handleGroupSelect}
+            onBackFromGroupDetail={handleBackFromGroupDetail}
           />
         )}
 
@@ -448,23 +483,58 @@ interface GroupKnowledgeContentProps {
   groups: Group[]
   loadingGroups: boolean
   refreshKey: number
+  initialGroup?: string
   onSelectKb: (kb: KnowledgeBase) => void
   onEditKb: (kb: KnowledgeBase) => void
   onDeleteKb: (kb: KnowledgeBase) => void
   onCreateKb: (groupName: string, kbType: KnowledgeBaseType) => void
+  onGroupSelect?: (group: Group | null) => void
+  onBackFromGroupDetail?: () => void
 }
 
 function GroupKnowledgeContent({
   groups,
   loadingGroups,
   refreshKey,
+  initialGroup,
   onSelectKb,
   onEditKb,
   onDeleteKb,
   onCreateKb,
+  onGroupSelect,
+  onBackFromGroupDetail,
 }: GroupKnowledgeContentProps) {
   const { t } = useTranslation()
-  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null)
+
+  // Initialize selectedGroup from initialGroup if provided
+  const initialGroupObject = initialGroup
+    ? (groups.find(g => g.name === initialGroup) ?? null)
+    : null
+  const [selectedGroup, setSelectedGroup] = useState<Group | null>(initialGroupObject)
+
+  // Sync selectedGroup when initialGroup or groups change
+  useEffect(() => {
+    if (initialGroup && groups.length > 0) {
+      const foundGroup = groups.find(g => g.name === initialGroup)
+      if (foundGroup) {
+        setSelectedGroup(foundGroup)
+      }
+    } else if (!initialGroup) {
+      setSelectedGroup(null)
+    }
+  }, [initialGroup, groups])
+
+  // Handle group selection with parent notification
+  const handleGroupClick = (group: Group) => {
+    setSelectedGroup(group)
+    onGroupSelect?.(group)
+  }
+
+  // Handle back button with parent notification
+  const handleBack = () => {
+    setSelectedGroup(null)
+    onBackFromGroupDetail?.()
+  }
 
   if (loadingGroups) {
     return (
@@ -489,7 +559,7 @@ function GroupKnowledgeContent({
       <GroupKnowledgeBaseList
         group={selectedGroup}
         refreshKey={refreshKey}
-        onBack={() => setSelectedGroup(null)}
+        onBack={handleBack}
         onSelectKb={onSelectKb}
         onEditKb={onEditKb}
         onDeleteKb={onDeleteKb}
@@ -503,7 +573,7 @@ function GroupKnowledgeContent({
     <div className="flex flex-col items-center">
       <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {groups.map(group => (
-          <GroupCard key={group.name} group={group} onClick={() => setSelectedGroup(group)} />
+          <GroupCard key={group.name} group={group} onClick={() => handleGroupClick(group)} />
         ))}
       </div>
     </div>

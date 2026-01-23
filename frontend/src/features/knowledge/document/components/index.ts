@@ -5,6 +5,7 @@
 export { KnowledgeBaseCard } from './KnowledgeBaseCard'
 export { GroupCard } from './GroupCard'
 export { KnowledgeDocumentPage } from './KnowledgeDocumentPage'
+export type { DocumentTabType, KnowledgeDocumentPageProps } from './KnowledgeDocumentPage'
 export { CreateKnowledgeBaseDialog } from './CreateKnowledgeBaseDialog'
 export { EditKnowledgeBaseDialog } from './EditKnowledgeBaseDialog'
 export { DeleteKnowledgeBaseDialog } from './DeleteKnowledgeBaseDialog'
