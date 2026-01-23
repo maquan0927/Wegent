@@ -27,6 +27,9 @@
     "documents": "个文档",
     "noTeamHint": "您还没有加入任何团队。创建或加入团队后，可在此查看团队知识库。",
     "noGroupHint": "您还没有加入任何组。创建或加入组后，可在此查看组知识库。",
+    "groupNotFound": "未找到该组",
+    "groupLoadError": "加载组信息失败",
+    "backToKnowledge": "返回知识",
     "tabs": {
       "personal": "个人知识",
       "group": "组知识",
