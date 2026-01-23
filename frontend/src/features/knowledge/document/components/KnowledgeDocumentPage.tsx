@@ -517,6 +517,13 @@ function GroupKnowledgeContent({
     }
   }, [initialGroupName, groups, selectedGroup])
 
+  // Clear selected group when initialGroupName is cleared (e.g., when clicking the group tab)
+  useEffect(() => {
+    if (!initialGroupName) {
+      setSelectedGroup(null)
+    }
+  }, [initialGroupName])
+
   // Handle group selection with URL sync
   const handleGroupSelect = useCallback(
     (group: Group) => {
