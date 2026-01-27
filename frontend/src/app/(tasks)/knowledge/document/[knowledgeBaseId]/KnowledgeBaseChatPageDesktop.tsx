@@ -186,7 +186,12 @@ export function KnowledgeBaseChatPageDesktop() {
 
   // Handle back to knowledge list
   const handleBack = () => {
-    router.push('/knowledge')
+    // Return to the appropriate knowledge list based on namespace
+    if (knowledgeBase && knowledgeBase.namespace !== 'default') {
+      router.push(`/knowledge/group/${knowledgeBase.namespace}`)
+    } else {
+      router.push('/knowledge')
+    }
   }
 
   // Check if user can manage this knowledge base

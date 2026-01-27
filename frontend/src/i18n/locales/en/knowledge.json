@@ -27,6 +27,9 @@
     "documents": "documents",
     "noTeamHint": "You haven't joined any teams yet. Create or join a team to view team knowledge bases here.",
     "noGroupHint": "You haven't joined any groups yet. Create or join a group to view group knowledge bases here.",
+    "groupNotFound": "Group not found",
+    "groupLoadError": "Failed to load group information",
+    "backToKnowledge": "Back to Knowledge",
     "tabs": {
       "personal": "Personal",
       "group": "Group",
