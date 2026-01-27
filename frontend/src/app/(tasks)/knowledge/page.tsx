@@ -4,8 +4,8 @@
 
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, useCallback } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import TopNavigation from '@/features/layout/TopNavigation'
 import {
   TaskSidebar,
@@ -32,11 +32,13 @@ import {
   KnowledgeTabs,
   KnowledgeTabType,
   KnowledgeDocumentPage,
+  DocumentTabType,
 } from '@/features/knowledge'
 
 export default function KnowledgePage() {
   const { t } = useTranslation()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { user } = useUser()
   const { clearAllStreams } = useChatStreamContext()
   const { setSelectedTask } = useTaskContext()
@@ -69,8 +71,29 @@ export default function KnowledgePage() {
     setPendingCancelProjectId,
   } = useWikiProjects()
 
-  // Active knowledge tab
-  const [activeTab, setActiveTab] = useState<KnowledgeTabType>('document')
+  // Read URL parameters for initial state
+  const typeParam = searchParams.get('type') as KnowledgeTabType | null
+  const tabParam = searchParams.get('tab') as DocumentTabType | null
+  const groupParam = searchParams.get('group')
+
+  // Active knowledge tab - initialize from URL param 'type'
+  const [activeTab, setActiveTab] = useState<KnowledgeTabType>(() => {
+    if (typeParam === 'code' || typeParam === 'document') {
+      return typeParam
+    }
+    return 'document'
+  })
+
+  // Document sub-tab state - managed by KnowledgeDocumentPage but controlled here
+  const [documentTab, setDocumentTab] = useState<DocumentTabType>(() => {
+    if (tabParam === 'personal' || tabParam === 'group' || tabParam === 'external') {
+      return tabParam
+    }
+    return 'personal'
+  })
+
+  // Selected group state
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(groupParam)
 
   // Search term for project list
   const [mainSearchTerm, setMainSearchTerm] = useState('')
@@ -80,6 +103,65 @@ export default function KnowledgePage() {
 
   // Collapsed sidebar state
   const [isCollapsed, setIsCollapsed] = useState(false)
+
+  // Update URL when state changes
+  const updateUrl = useCallback(
+    (type: KnowledgeTabType, tab?: DocumentTabType | null, group?: string | null) => {
+      const params = new URLSearchParams()
+
+      // Always set type
+      params.set('type', type)
+
+      // Only set tab for document type
+      if (type === 'document' && tab) {
+        params.set('tab', tab)
+      }
+
+      // Only set group when on group tab and group is selected
+      if (type === 'document' && tab === 'group' && group) {
+        params.set('group', group)
+      }
+
+      const newUrl = `/knowledge?${params.toString()}`
+      router.replace(newUrl)
+    },
+    [router]
+  )
+
+  // Handle knowledge type tab change
+  const handleKnowledgeTabChange = useCallback(
+    (tab: KnowledgeTabType) => {
+      setActiveTab(tab)
+      if (tab === 'code') {
+        updateUrl(tab)
+      } else {
+        // When switching to document, preserve current document tab but clear group
+        updateUrl(tab, documentTab, null)
+        setSelectedGroup(null)
+      }
+    },
+    [documentTab, updateUrl]
+  )
+
+  // Handle document sub-tab change
+  const handleDocumentTabChange = useCallback(
+    (tab: DocumentTabType) => {
+      setDocumentTab(tab)
+      // Clear group when switching document tabs
+      setSelectedGroup(null)
+      updateUrl('document', tab, null)
+    },
+    [updateUrl]
+  )
+
+  // Handle group selection/deselection
+  const handleGroupChange = useCallback(
+    (groupName: string | null) => {
+      setSelectedGroup(groupName)
+      updateUrl('document', 'group', groupName)
+    },
+    [updateUrl]
+  )
 
   const navigateToKnowledgeDetail = (projectId: number) => {
     router.push(`/knowledge/${projectId}`)
@@ -170,7 +252,7 @@ export default function KnowledgePage() {
         </TopNavigation>
 
         {/* Knowledge type tabs */}
-        <KnowledgeTabs activeTab={activeTab} onTabChange={setActiveTab} />
+        <KnowledgeTabs activeTab={activeTab} onTabChange={handleKnowledgeTabChange} />
 
         {/* Content area based on active tab */}
         <div className="flex-1 overflow-auto p-6">
@@ -203,7 +285,14 @@ export default function KnowledgePage() {
             </>
           )}
 
-          {activeTab === 'document' && <KnowledgeDocumentPage />}
+          {activeTab === 'document' && (
+            <KnowledgeDocumentPage
+              initialTab={documentTab}
+              initialGroup={selectedGroup ?? undefined}
+              onTabChange={handleDocumentTabChange}
+              onGroupChange={handleGroupChange}
+            />
+          )}
         </div>
       </div>
 

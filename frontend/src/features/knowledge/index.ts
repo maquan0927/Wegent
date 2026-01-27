@@ -31,4 +31,5 @@ export type { ContentWriteSummary, ContentWrite } from './wikiUtils'
 
 // Document Knowledge exports
 export { KnowledgeDocumentPage } from './document/components'
+export type { DocumentTabType, KnowledgeDocumentPageProps } from './document/components'
 export { useKnowledgeBases, useDocuments } from './document/hooks'
