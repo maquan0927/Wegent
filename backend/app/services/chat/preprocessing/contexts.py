@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Knowledge base prompt constants
 # These are duplicated from chat_shell/prompts/knowledge_base.py for backend use
 # Strict mode prompt: User explicitly selected KB for this message
-KB_PROMPT_STRICT = """
+KB_PROMPT_STRICT_TEMPLATE = """
 
 <knowledge_base>
 ## Knowledge Base Requirement
@@ -51,11 +51,12 @@ The user has selected specific knowledge bases for this conversation. You MUST u
 - If unsure, search again with different keywords
 
 The user expects answers based on the selected knowledge base content only.
+{kb_meta_info}
 </knowledge_base>
 """
 
 # Relaxed mode prompt: KB inherited from task, AI can use general knowledge as fallback
-KB_PROMPT_RELAXED = """
+KB_PROMPT_RELAXED_TEMPLATE = """
 
 <knowledge_base>
 ## Knowledge Base Available
@@ -73,6 +74,7 @@ You have access to knowledge bases from previous conversations in this task. You
 - If the knowledge base doesn't contain relevant information, feel free to answer using your general knowledge
 - Clearly indicate when your answer is based on knowledge base content vs. general knowledge
 - The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information
+{kb_meta_info}
 </knowledge_base>
 """
 
@@ -961,39 +963,28 @@ def _prepare_kb_tools_from_contexts(
     )
     extra_tools.append(kb_tool)
 
-    # Choose prompt based on whether KB is user-selected or inherited from task
+    # Get historical knowledge base meta info if available
+    kb_meta_info = ""
+    if task_id:
+        kb_meta_info = _build_historical_kb_meta_prompt(db, task_id)
+
+    # Choose prompt template based on whether KB is user-selected or inherited from task
     if is_user_selected_kb:
         # Strict mode: User explicitly selected KB for this message
-        kb_instruction = KB_PROMPT_STRICT
+        kb_instruction = KB_PROMPT_STRICT_TEMPLATE.format(kb_meta_info=kb_meta_info)
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using STRICT mode prompt "
             "(user explicitly selected KB)"
         )
     else:
         # Relaxed mode: KB inherited from task, AI can use general knowledge as fallback
-        kb_instruction = KB_PROMPT_RELAXED
+        kb_instruction = KB_PROMPT_RELAXED_TEMPLATE.format(kb_meta_info=kb_meta_info)
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using RELAXED mode prompt "
             "(KB inherited from task)"
         )
 
     enhanced_system_prompt = f"{base_system_prompt}{kb_instruction}"
-
-    # Add historical knowledge base meta info if available
-    # Insert before the closing </knowledge_base> tag to keep it inside the KB section
-    if task_id:
-        kb_meta_prompt = _build_historical_kb_meta_prompt(db, task_id)
-        if kb_meta_prompt:
-            # Find the closing tag and insert meta info before it
-            closing_tag = "</knowledge_base>"
-            if closing_tag in enhanced_system_prompt:
-                enhanced_system_prompt = enhanced_system_prompt.replace(
-                    closing_tag,
-                    f"{kb_meta_prompt}{closing_tag}",
-                )
-            else:
-                # Fallback: append if no closing tag found
-                enhanced_system_prompt = f"{enhanced_system_prompt}{kb_meta_prompt}"
 
     return extra_tools, enhanced_system_prompt
 
