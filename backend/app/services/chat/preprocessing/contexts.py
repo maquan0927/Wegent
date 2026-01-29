@@ -222,7 +222,9 @@ def _build_vision_structure(
     combined_text = ""
     if text_contents:
         # Wrap all attachment contents in a single <attachment> XML tag
-        combined_text = "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+        combined_text = (
+            "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+        )
     combined_text += f"[User Question]:\n{message}"
 
     return {
@@ -244,7 +246,9 @@ def _combine_text_contents(text_contents: List[str], message: str) -> str:
         Combined message string with all attachments wrapped in a single <attachment> XML tag
     """
     # Wrap all attachment contents in a single <attachment> XML tag
-    combined_contents = "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+    combined_contents = (
+        "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+    )
     return f"{combined_contents}[User Question]:\n{message}"
 
 
@@ -865,7 +869,10 @@ async def _process_attachment_contexts_for_message(
     if image_contents:
         combined_text = ""
         if text_contents:
-            combined_text = "\n".join(text_contents) + "\n\n"
+            # Wrap all attachment contents in a single <attachment> XML tag
+            combined_text = (
+                "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+            )
         combined_text += f"[User Question]:\n{message}"
 
         return {
@@ -874,9 +881,12 @@ async def _process_attachment_contexts_for_message(
             "images": image_contents,
         }
 
-    # If only text contents, combine them
+    # If only text contents, combine them with <attachment> XML tag
     if text_contents:
-        combined_contents = "\n".join(text_contents)
+        # Wrap all attachment contents in a single <attachment> XML tag
+        combined_contents = (
+            "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
+        )
         return f"{combined_contents}[User Question]:\n{message}"
 
     return message
