@@ -454,10 +454,16 @@ def _build_history_message(
                         )
                     break
 
-        # Combine all text parts: attachments first, then knowledge bases
-        all_text_parts = attachment_text_parts + kb_text_parts
-        if all_text_parts:
-            combined_prefix = "".join(all_text_parts)
+        # Combine all text parts with XML tags:
+        # - attachments wrapped in <attachment> tag
+        # - knowledge bases wrapped in <knowledge_base> tag
+        combined_prefix = ""
+        if attachment_text_parts:
+            combined_prefix += "<attachment>\n" + "".join(attachment_text_parts) + "</attachment>\n\n"
+        if kb_text_parts:
+            combined_prefix += "<knowledge_base>\n" + "".join(kb_text_parts) + "</knowledge_base>\n\n"
+
+        if combined_prefix:
             text_content = f"{combined_prefix}{text_content}"
 
         if vision_parts:
@@ -496,22 +502,30 @@ def _build_vision_content_block(context) -> dict[str, Any] | None:
 
 
 def _build_document_text_prefix(context) -> str:
-    """Build a text prefix for a document context, wrapped in <attachment> XML tags."""
+    """Build a text prefix for a document context (without XML tags).
+
+    Note: This returns raw content. The caller is responsible for wrapping
+    multiple attachments in a single <attachment> XML tag.
+    """
     if not context.extracted_text:
         return ""
 
     name = context.name or "document"
-    return f"<attachment>\n[Document: {name}]\n{context.extracted_text}\n</attachment>\n\n"
+    return f"[Document: {name}]\n{context.extracted_text}\n\n"
 
 
 def _build_knowledge_base_text_prefix(context) -> str:
-    """Build a text prefix for a knowledge base context, wrapped in <knowledge_base> XML tags."""
+    """Build a text prefix for a knowledge base context (without XML tags).
+
+    Note: This returns raw content. The caller is responsible for wrapping
+    multiple knowledge base contents in a single <knowledge_base> XML tag.
+    """
     if not context.extracted_text:
         return ""
 
     kb_name = context.name or "Knowledge Base"
     kb_id = context.knowledge_id or "unknown"
-    return f"<knowledge_base>\n[Knowledge Base: {kb_name} (ID: {kb_id})]\n{context.extracted_text}\n</knowledge_base>\n\n"
+    return f"[Knowledge Base: {kb_name} (ID: {kb_id})]\n{context.extracted_text}\n\n"
 
 
 def _truncate_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:

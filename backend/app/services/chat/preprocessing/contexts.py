@@ -212,7 +212,7 @@ def _build_vision_structure(
     Build multi-vision structure for image contexts.
 
     Args:
-        text_contents: List of text content strings
+        text_contents: List of text content strings (attachment contents without XML tags)
         image_contents: List of image content dictionaries
         message: Original user message
 
@@ -221,7 +221,8 @@ def _build_vision_structure(
     """
     combined_text = ""
     if text_contents:
-        combined_text = "\n".join(text_contents) + "\n\n"
+        # Wrap all attachment contents in a single <attachment> XML tag
+        combined_text = "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
     combined_text += f"[User Question]:\n{message}"
 
     return {
@@ -236,13 +237,14 @@ def _combine_text_contents(text_contents: List[str], message: str) -> str:
     Combine text contents with user message.
 
     Args:
-        text_contents: List of text content strings
+        text_contents: List of text content strings (attachment contents without XML tags)
         message: Original user message
 
     Returns:
-        Combined message string
+        Combined message string with all attachments wrapped in a single <attachment> XML tag
     """
-    combined_contents = "\n".join(text_contents)
+    # Wrap all attachment contents in a single <attachment> XML tag
+    combined_contents = "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
     return f"{combined_contents}[User Question]:\n{message}"
 
 
