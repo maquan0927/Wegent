@@ -64,10 +64,9 @@ class TestDeepThinkingPrompt:
             enable_deep_thinking=False,
         )
 
-        # Result should be base prompt wrapped in <base_prompt> tags (no other enhancements)
-        assert "<base_prompt>" in result
-        assert base_prompt in result
-        assert "</base_prompt>" in result
+        # Result should be same as base prompt (no enhancements when both flags are False)
+        # Note: <base_prompt> tag is NOT added here - it's added by Backend's get_bot_system_prompt()
+        assert result == base_prompt
         # Should NOT contain deep thinking or clarification prompts
         assert "<deep_thinking_mode>" not in result
         assert "<clarification_mode>" not in result

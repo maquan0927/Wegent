@@ -980,10 +980,20 @@ def _prepare_kb_tools_from_contexts(
     enhanced_system_prompt = f"{base_system_prompt}{kb_instruction}"
 
     # Add historical knowledge base meta info if available
+    # Insert before the closing </knowledge_base> tag to keep it inside the KB section
     if task_id:
         kb_meta_prompt = _build_historical_kb_meta_prompt(db, task_id)
         if kb_meta_prompt:
-            enhanced_system_prompt = f"{enhanced_system_prompt}{kb_meta_prompt}"
+            # Find the closing tag and insert meta info before it
+            closing_tag = "</knowledge_base>"
+            if closing_tag in enhanced_system_prompt:
+                enhanced_system_prompt = enhanced_system_prompt.replace(
+                    closing_tag,
+                    f"{kb_meta_prompt}{closing_tag}",
+                )
+            else:
+                # Fallback: append if no closing tag found
+                enhanced_system_prompt = f"{enhanced_system_prompt}{kb_meta_prompt}"
 
     return extra_tools, enhanced_system_prompt
 

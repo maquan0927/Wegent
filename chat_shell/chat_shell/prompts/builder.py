@@ -353,13 +353,13 @@ def build_system_prompt(
         The final system prompt with all enhancements applied
 
     Injection Order:
-        1. Base prompt (wrapped in <base_prompt> tags)
+        1. Base prompt (caller should wrap Ghost systemPrompt in <base_prompt> tags if needed)
         2. Clarification mode instructions (if enabled)
         3. Deep thinking mode instructions (if enabled)
         4. On-demand skill metadata (for load_skill tool)
         5. Preloaded skills (injected later by prompt_modifier)
     """
-    system_prompt = f"<base_prompt>\n{base_prompt}\n</base_prompt>"
+    system_prompt = base_prompt
 
     # Append clarification mode instructions if enabled
     if enable_clarification:
