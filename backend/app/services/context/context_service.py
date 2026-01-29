@@ -340,15 +340,17 @@ class ContextService:
     def build_document_text_prefix(
         self,
         context: SubtaskContext,
+        attachment_index: Optional[int] = None,
     ) -> Optional[str]:
         """
         Build a text prefix containing document content for prepending to messages.
 
         Args:
             context: SubtaskContext record with extracted_text
+            attachment_index: Optional attachment index for labeling (e.g., 1 for "Attachment 1")
 
         Returns:
-            Formatted text prefix, or None if no extracted text
+            Formatted text prefix wrapped in <attachment> XML tags, or None if no extracted text
         """
         if not context.extracted_text:
             return None
@@ -357,18 +359,25 @@ class ContextService:
         max_text_length = DocumentParser.get_max_text_length()
         is_truncated = context.text_length >= max_text_length
 
-        # Build the prefix with optional truncation notice
-        prefix = f"[File Content - {context.original_filename}]:\n"
+        # Build the content parts
+        parts = []
+
+        # Add attachment index label if provided
+        if attachment_index is not None:
+            parts.append(f"[Attachment {attachment_index}]")
+
+        parts.append(f"[File Content - {context.original_filename}]:")
 
         if is_truncated:
-            prefix += (
+            parts.append(
                 f"(Note: The file content is too long and has been truncated to "
-                f"{max_text_length} characters. The following is only partial content.)\n"
+                f"{max_text_length} characters. The following is only partial content.)"
             )
 
-        prefix += f"{context.extracted_text}\n\n"
+        parts.append(context.extracted_text)
 
-        return prefix
+        # Wrap in <attachment> XML tags
+        return f"<attachment>\n{chr(10).join(parts)}\n</attachment>\n\n"
 
     def build_message_with_attachment(
         self,
@@ -546,7 +555,7 @@ class ContextService:
             context: SubtaskContext record with extracted_text from RAG
 
         Returns:
-            Formatted text prefix, or None if no extracted text
+            Formatted text prefix wrapped in <knowledge_base> XML tags, or None if no extracted text
         """
         if not context.extracted_text:
             return None
@@ -566,12 +575,15 @@ class ContextService:
             source_names.append(f"... and {len(sources) - 5} more")
         sources_str = ", ".join(source_names) if source_names else "N/A"
 
-        # Build the prefix
-        prefix = f"[Knowledge Base - {kb_name}]:\n"
-        prefix += f"(Sources: {sources_str})\n"
-        prefix += f"{context.extracted_text}\n\n"
+        # Build the content parts
+        parts = [
+            f"[Knowledge Base - {kb_name}]:",
+            f"(Sources: {sources_str})",
+            context.extracted_text,
+        ]
 
-        return prefix
+        # Wrap in <knowledge_base> XML tags
+        return f"<knowledge_base>\n{chr(10).join(parts)}\n</knowledge_base>\n\n"
 
     def get_knowledge_base_contexts_by_subtask(
         self,

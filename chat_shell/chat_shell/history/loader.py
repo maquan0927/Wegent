@@ -496,22 +496,22 @@ def _build_vision_content_block(context) -> dict[str, Any] | None:
 
 
 def _build_document_text_prefix(context) -> str:
-    """Build a text prefix for a document context."""
+    """Build a text prefix for a document context, wrapped in <attachment> XML tags."""
     if not context.extracted_text:
         return ""
 
     name = context.name or "document"
-    return f"[Document: {name}]\n{context.extracted_text}\n\n"
+    return f"<attachment>\n[Document: {name}]\n{context.extracted_text}\n</attachment>\n\n"
 
 
 def _build_knowledge_base_text_prefix(context) -> str:
-    """Build a text prefix for a knowledge base context."""
+    """Build a text prefix for a knowledge base context, wrapped in <knowledge_base> XML tags."""
     if not context.extracted_text:
         return ""
 
     kb_name = context.name or "Knowledge Base"
     kb_id = context.knowledge_id or "unknown"
-    return f"[Knowledge Base: {kb_name} (ID: {kb_id})]\n{context.extracted_text}\n\n"
+    return f"<knowledge_base>\n[Knowledge Base: {kb_name} (ID: {kb_id})]\n{context.extracted_text}\n</knowledge_base>\n\n"
 
 
 def _truncate_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -271,10 +271,13 @@ def _process_attachment_context(
             }
         )
     else:
-        # Text document - get formatted content
-        doc_prefix = context_service.build_document_text_prefix(context)
+        # Text document - get formatted content with attachment index
+        # The content is wrapped in <attachment> XML tags by context_service
+        doc_prefix = context_service.build_document_text_prefix(
+            context, attachment_index=idx
+        )
         if doc_prefix:
-            text_contents.append(f"[Attachment {idx}]\n{doc_prefix}")
+            text_contents.append(doc_prefix)
 
 
 async def process_attachments(
