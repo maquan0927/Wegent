@@ -64,8 +64,13 @@ class TestDeepThinkingPrompt:
             enable_deep_thinking=False,
         )
 
-        # Should be same as base (no enhancements when both flags are False)
-        assert result == base_prompt
+        # Result should be base prompt wrapped in <base_prompt> tags (no other enhancements)
+        assert "<base_prompt>" in result
+        assert base_prompt in result
+        assert "</base_prompt>" in result
+        # Should NOT contain deep thinking or clarification prompts
+        assert "<deep_thinking_mode>" not in result
+        assert "<clarification_mode>" not in result
 
 
 class TestMessageBuilding:

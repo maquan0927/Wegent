@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Strict mode prompt: User explicitly selected KB for this message
 KB_PROMPT_STRICT = """
 
+<knowledge_base>
 ## Knowledge Base Requirement
 
 The user has selected specific knowledge bases for this conversation. You MUST use the `knowledge_base_search` tool to retrieve information from these knowledge bases before answering any questions.
@@ -49,11 +50,14 @@ The user has selected specific knowledge bases for this conversation. You MUST u
 - You MUST NOT make up information if the knowledge base doesn't contain it
 - If unsure, search again with different keywords
 
-The user expects answers based on the selected knowledge base content only."""
+The user expects answers based on the selected knowledge base content only.
+</knowledge_base>
+"""
 
 # Relaxed mode prompt: KB inherited from task, AI can use general knowledge as fallback
 KB_PROMPT_RELAXED = """
 
+<knowledge_base>
 ## Knowledge Base Available
 
 You have access to knowledge bases from previous conversations in this task. You can use the `knowledge_base_search` tool to retrieve information from these knowledge bases.
@@ -68,11 +72,14 @@ You have access to knowledge bases from previous conversations in this task. You
 - Search the knowledge base when the question seems related to its content
 - If the knowledge base doesn't contain relevant information, feel free to answer using your general knowledge
 - Clearly indicate when your answer is based on knowledge base content vs. general knowledge
-- The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information"""
+- The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information
+</knowledge_base>
+"""
 
 # Table context prompt template - will be dynamically generated with table info
 TABLE_PROMPT_TEMPLATE = """
 
+<table_context>
 # IMPORTANT: Data Table Context - HIGHEST PRIORITY
 
 The user has selected data table(s) for this conversation. This indicates that the user's request is related to these tables.
@@ -94,7 +101,9 @@ The user has selected data table(s) for this conversation. This indicates that t
 2. Analyze the returned data based on user's request
 3. Present the results
 
-The user explicitly selected these table(s) - prioritize table operations over any other tools."""
+The user explicitly selected these table(s) - prioritize table operations over any other tools.
+</table_context>
+"""
 
 
 def build_table_prompt(table_contexts: List[dict]) -> str:
