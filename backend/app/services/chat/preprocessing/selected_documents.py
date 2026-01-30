@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTEXT_WINDOW = 128000
 
 # Maximum ratio of context window that can be used for document injection
-MAX_INJECTION_RATIO = 0.3
+MAX_INJECTION_RATIO = 0.5
 
 # Prompt template for selected documents context (direct injection mode)
 SELECTED_DOCUMENTS_PROMPT_TEMPLATE = """

@@ -9,6 +9,9 @@
 import { apiClient } from './client'
 import type {
   AccessibleKnowledgeResponse,
+  ChunkListResponse,
+  ChunkResponse,
+  DocumentDetailResponse,
   KnowledgeBase,
   KnowledgeBaseCreate,
   KnowledgeBaseListResponse,
@@ -67,6 +70,19 @@ export async function updateKnowledgeBase(
  */
 export async function deleteKnowledgeBase(id: number): Promise<void> {
   return apiClient.delete(`/knowledge-bases/${id}`)
+}
+
+/**
+ * Update the knowledge base type (notebook <-> classic conversion)
+ * @param id Knowledge base ID
+ * @param kbType New type: 'notebook' or 'classic'
+ * @returns Updated knowledge base
+ */
+export async function updateKnowledgeBaseType(
+  id: number,
+  kbType: 'notebook' | 'classic'
+): Promise<KnowledgeBase> {
+  return apiClient.patch<KnowledgeBase>(`/knowledge-bases/${id}/type`, { kb_type: kbType })
 }
 
 // ============== Knowledge Document APIs ==============
@@ -212,4 +228,88 @@ export async function refreshWebDocument(documentId: number): Promise<WebDocumen
   return apiClient.post<WebDocumentRefreshResponse>('/web-scraper/refresh-document', {
     document_id: documentId,
   })
+}
+
+// ============== Summary Refresh APIs ==============
+
+/**
+ * Response type for knowledge base summary refresh
+ */
+export interface KnowledgeBaseSummaryRefreshResponse {
+  message: string
+  status: string
+}
+
+/**
+ * Refresh knowledge base summary by re-aggregating document summaries
+ * @param kbId The knowledge base ID to refresh summary for
+ * @returns Refresh result with status
+ */
+export async function refreshKnowledgeBaseSummary(
+  kbId: number
+): Promise<KnowledgeBaseSummaryRefreshResponse> {
+  return apiClient.post<KnowledgeBaseSummaryRefreshResponse>(
+    `/knowledge-bases/${kbId}/summary/refresh`
+  )
+}
+
+// ============== Configuration APIs ==============
+
+/**
+ * Knowledge base configuration response
+ */
+export interface KnowledgeConfig {
+  chunk_storage_enabled: boolean
+}
+
+/**
+ * Get knowledge base configuration
+ * Returns system-level configuration for knowledge base features
+ */
+export async function getKnowledgeConfig(): Promise<KnowledgeConfig> {
+  return apiClient.get<KnowledgeConfig>('/knowledge-bases/config')
+}
+
+// ============== Chunk APIs ==============
+
+/**
+ * List chunks for a document with pagination
+ * @param documentId The document ID
+ * @param page Page number (1-based)
+ * @param pageSize Number of items per page
+ * @param search Optional search keyword
+ */
+export async function listDocumentChunks(
+  documentId: number,
+  page: number = 1,
+  pageSize: number = 20,
+  search?: string
+): Promise<ChunkListResponse> {
+  let endpoint = `/knowledge-documents/${documentId}/chunks?page=${page}&page_size=${pageSize}`
+  if (search) {
+    endpoint += `&search=${encodeURIComponent(search)}`
+  }
+  return apiClient.get<ChunkListResponse>(endpoint)
+}
+
+/**
+ * Get a single chunk by index
+ * @param documentId The document ID
+ * @param chunkIndex The chunk index (0-based)
+ */
+export async function getDocumentChunk(
+  documentId: number,
+  chunkIndex: number
+): Promise<ChunkResponse> {
+  return apiClient.get<ChunkResponse>(`/knowledge-documents/${documentId}/chunks/${chunkIndex}`)
+}
+
+/**
+ * Get document detail (content and summary)
+ * Note: This endpoint requires knowing the knowledge_base_id.
+ * Use getDocumentContent for document-only access without kb_id.
+ * @param documentId The document ID
+ */
+export async function getDocumentDetail(documentId: number): Promise<DocumentDetailResponse> {
+  return apiClient.get<DocumentDetailResponse>(`/knowledge-documents/${documentId}/detail`)
 }

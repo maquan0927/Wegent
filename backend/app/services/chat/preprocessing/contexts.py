@@ -24,59 +24,9 @@ from sqlalchemy.orm import Session
 from app.models.knowledge import KnowledgeDocument
 from app.models.subtask_context import ContextStatus, ContextType, SubtaskContext
 from app.services.context import context_service
+from shared.prompts import KB_PROMPT_RELAXED, KB_PROMPT_STRICT
 
 logger = logging.getLogger(__name__)
-
-# Knowledge base prompt constants
-# These are duplicated from chat_shell/prompts/knowledge_base.py for backend use
-# Strict mode prompt: User explicitly selected KB for this message
-KB_PROMPT_STRICT_TEMPLATE = """
-
-<knowledge_base>
-## Knowledge Base Requirement
-
-The user has selected specific knowledge bases for this conversation. You MUST use the `knowledge_base_search` tool to retrieve information from these knowledge bases before answering any questions.
-
-### Required Workflow:
-1. **ALWAYS** call `knowledge_base_search` first with the user's query
-2. Wait for the search results
-3. Base your answer **ONLY** on the retrieved information
-4. If the search returns no results or irrelevant information, clearly state: "I cannot find relevant information in the selected knowledge base to answer this question."
-5. **DO NOT** use your general knowledge or make assumptions beyond what's in the knowledge base
-
-### Critical Rules:
-- You MUST search the knowledge base for EVERY user question
-- You MUST NOT answer without searching first
-- You MUST NOT make up information if the knowledge base doesn't contain it
-- If unsure, search again with different keywords
-
-The user expects answers based on the selected knowledge base content only.
-{kb_meta_info}
-</knowledge_base>
-"""
-
-# Relaxed mode prompt: KB inherited from task, AI can use general knowledge as fallback
-KB_PROMPT_RELAXED_TEMPLATE = """
-
-<knowledge_base>
-## Knowledge Base Available
-
-You have access to knowledge bases from previous conversations in this task. You can use the `knowledge_base_search` tool to retrieve information from these knowledge bases.
-
-### Recommended Workflow:
-1. When the user's question might be related to the knowledge base content, consider calling `knowledge_base_search` with relevant keywords
-2. If relevant information is found, prioritize using it in your answer and cite the sources
-3. If the search returns no results or irrelevant information, you may use your general knowledge to answer the question
-4. Be transparent about whether your answer is based on knowledge base content or general knowledge
-
-### Guidelines:
-- Search the knowledge base when the question seems related to its content
-- If the knowledge base doesn't contain relevant information, feel free to answer using your general knowledge
-- Clearly indicate when your answer is based on knowledge base content vs. general knowledge
-- The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information
-{kb_meta_info}
-</knowledge_base>
-"""
 
 # Table context prompt template - will be dynamically generated with table info
 TABLE_PROMPT_TEMPLATE = """
@@ -214,7 +164,6 @@ def _build_vision_structure(
     Args:
         text_contents: List of text content strings (attachment contents without XML tags)
         image_contents: List of image content dictionaries
-        message: Original user message
 
     Returns:
         Vision structure dictionary
@@ -225,6 +174,12 @@ def _build_vision_structure(
         combined_text = (
             "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
         )
+
+    # Add image metadata headers to text
+    for img in image_contents:
+        if "image_header" in img:
+            combined_text += img["image_header"] + "\n\n"
+
     combined_text += f"[User Question]:\n{message}"
 
     return {
@@ -269,11 +224,28 @@ def _process_attachment_context(
     """
     # Check if it's an image attachment
     if context_service.is_image_context(context) and context.image_base64:
+        # Build image attachment metadata
+        attachment_id = context.id
+        filename = context.original_filename
+        mime_type = context.mime_type or "unknown"
+        file_size = context.file_size or 0
+        formatted_size = context_service.format_file_size(file_size)
+        url = context_service.build_attachment_url(attachment_id)
+
+        # Build image metadata header
+        image_header = (
+            f"[Image Attachment: {filename} | ID: {attachment_id} | "
+            f"Type: {mime_type} | Size: {formatted_size} | URL: {url}]"
+        )
+
         image_contents.append(
             {
                 "image_base64": context.image_base64,
                 "mime_type": context.mime_type,
                 "filename": context.original_filename,
+                "id": attachment_id,
+                "url": url,
+                "image_header": image_header,
             }
         )
     else:
@@ -671,6 +643,7 @@ async def prepare_contexts_for_chat(
     message: str,
     base_system_prompt: str,
     task_id: Optional[int] = None,
+    context_window: Optional[int] = None,
 ) -> Tuple[str, str, List[BaseTool], bool, List[dict]]:
     """
     Unified context processing based on user_subtask_id.
@@ -690,6 +663,9 @@ async def prepare_contexts_for_chat(
         message: Original user message
         base_system_prompt: Base system prompt to enhance
         task_id: Optional task ID for fetching historical KB meta
+        context_window: Optional model context window size from Model spec.
+            Used for selected_documents injection threshold calculation.
+            If None, uses default value (128000).
 
     Returns:
         Tuple of (final_message, enhanced_system_prompt, extra_tools, has_table_context, table_contexts)
@@ -816,16 +792,26 @@ async def prepare_contexts_for_chat(
     if selected_docs_contexts:
         from .selected_documents import process_selected_documents_contexts
 
-        final_message, enhanced_system_prompt, extra_tools = (
-            process_selected_documents_contexts(
-                db=db,
-                selected_docs_contexts=selected_docs_contexts,
-                user_id=user_id,
-                message=final_message,
-                base_system_prompt=enhanced_system_prompt,
-                extra_tools=extra_tools,
-                user_subtask_id=user_subtask_id,
+        # Build kwargs for process_selected_documents_contexts
+        # Only pass context_window if explicitly provided (from Model spec)
+        kwargs = {
+            "db": db,
+            "selected_docs_contexts": selected_docs_contexts,
+            "user_id": user_id,
+            "message": final_message,
+            "base_system_prompt": enhanced_system_prompt,
+            "extra_tools": extra_tools,
+            "user_subtask_id": user_subtask_id,
+        }
+        if context_window is not None:
+            kwargs["context_window"] = context_window
+            logger.info(
+                f"[prepare_contexts_for_chat] Using model context_window={context_window} "
+                f"for selected_documents injection threshold"
             )
+
+        final_message, enhanced_system_prompt, extra_tools = (
+            process_selected_documents_contexts(**kwargs)
         )
 
     has_table_context = len(table_contexts) > 0
@@ -865,21 +851,9 @@ async def _process_attachment_contexts_for_message(
             logger.exception(f"Error processing attachment context {context.id}: {e}")
             continue
 
-    # If we have images, return a multi-vision structure
+    # If we have images, return a multi-vision structure with image metadata headers
     if image_contents:
-        combined_text = ""
-        if text_contents:
-            # Wrap all attachment contents in a single <attachment> XML tag
-            combined_text = (
-                "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
-            )
-        combined_text += f"[User Question]:\n{message}"
-
-        return {
-            "type": "multi_vision",
-            "text": combined_text,
-            "images": image_contents,
-        }
+        return _build_vision_structure(text_contents, image_contents, message)
 
     # If only text contents, combine them with <attachment> XML tag
     if text_contents:
@@ -984,16 +958,17 @@ def _prepare_kb_tools_from_contexts(
         kb_meta_info = _build_historical_kb_meta_prompt(db, task_id)
 
     # Choose prompt template based on whether KB is user-selected or inherited from task
+    # Use the shared prompts which already include XML tags
     if is_user_selected_kb:
         # Strict mode: User explicitly selected KB for this message
-        kb_instruction = KB_PROMPT_STRICT_TEMPLATE.format(kb_meta_info=kb_meta_info)
+        kb_instruction = KB_PROMPT_STRICT + (f"\n{kb_meta_info}" if kb_meta_info else "")
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using STRICT mode prompt "
             "(user explicitly selected KB)"
         )
     else:
         # Relaxed mode: KB inherited from task, AI can use general knowledge as fallback
-        kb_instruction = KB_PROMPT_RELAXED_TEMPLATE.format(kb_meta_info=kb_meta_info)
+        kb_instruction = KB_PROMPT_RELAXED + (f"\n{kb_meta_info}" if kb_meta_info else "")
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using RELAXED mode prompt "
             "(KB inherited from task)"

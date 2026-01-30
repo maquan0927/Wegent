@@ -25,6 +25,7 @@ from app.models.kind import Kind
 from app.models.subtask import Subtask
 from app.models.task import TaskResource
 from app.models.user import User
+from shared.models.db.enums import SubtaskStatus
 from shared.telemetry.context import (
     SpanAttributes,
     SpanManager,
@@ -184,11 +185,31 @@ async def trigger_ai_response(
         )
     else:
         # Executor-based (ClaudeCode, Agno, etc.)
-        # AI response is handled by executor_manager
-        # The executor_manager polls for PENDING tasks and processes them
-        logger.info(
-            "[ai_trigger] Non-direct chat, AI response handled by executor_manager"
-        )
+        # Check task_type to determine execution target
+        task_type = getattr(payload, "task_type", None) if payload else None
+        device_id = getattr(payload, "device_id", None) if payload else None
+
+        if task_type == "task" and device_id:
+            # Route to local device
+            logger.info(
+                "[ai_trigger] Device task, routing to local device: device_id=%s",
+                device_id,
+            )
+            await _trigger_device_execution(
+                task=task,
+                assistant_subtask=assistant_subtask,
+                team=team,
+                user=user,
+                payload=payload,
+                task_room=task_room,
+                user_subtask_id=user_subtask_id,
+                auth_token=auth_token,
+            )
+        else:
+            # Cloud executor (Executor Manager polls for PENDING tasks)
+            logger.info(
+                "[ai_trigger] Executor task, AI response handled by executor_manager"
+            )
 
 
 async def _trigger_direct_chat(
@@ -507,6 +528,9 @@ async def _stream_chat_response(
         if user_subtask_id:
             from app.services.chat.preprocessing import prepare_contexts_for_chat
 
+            # Get context_window from model_config for selected_documents injection threshold
+            model_context_window = chat_config.model_config.get("context_window")
+
             (
                 final_message,
                 enhanced_system_prompt,
@@ -520,6 +544,7 @@ async def _stream_chat_response(
                 message=message,
                 base_system_prompt=base_system_prompt_with_memory,  # Use prompt with memories
                 task_id=stream_data.task_id,
+                context_window=model_context_window,  # Pass model's context_window from Model spec
             )
             logger.info(
                 f"[ai_trigger] Unified context processing completed: "
@@ -1178,6 +1203,13 @@ async def _stream_with_http_adapter(
                     result=result,
                 )
 
+                # Publish event for pet experience update (decoupled from pet module)
+                from app.core.events import ChatCompletedEvent, get_event_bus
+
+                await get_event_bus().publish(
+                    ChatCompletedEvent(user_id=stream_data.user_id)
+                )
+
             elif event.type == ChatEventType.ERROR:
                 # Error - emit error event
                 error_msg = event.data.get("error", "Unknown error")
@@ -1525,6 +1557,11 @@ async def _stream_with_bridge(
                 result=result,
             )
 
+        # Publish event for pet experience update (decoupled from pet module)
+        from app.core.events import ChatCompletedEvent, get_event_bus
+
+        await get_event_bus().publish(ChatCompletedEvent(user_id=stream_data.user_id))
+
     except Exception as e:
         logger.exception("[BRIDGE] subtask=%s error", subtask_id)
         await core.handle_error(e)
@@ -1819,5 +1856,119 @@ def _get_bot_mcp_servers_for_http(bot_name: str, bot_namespace: str) -> Dict[str
             bot_name,
         )
         return {}
+    finally:
+        db.close()
+
+
+async def _trigger_device_execution(
+    task: TaskResource,
+    assistant_subtask: Subtask,
+    team: Kind,
+    user: User,
+    payload: Any,
+    task_room: str,
+    user_subtask_id: Optional[int] = None,
+    auth_token: str = "",
+) -> None:
+    """
+    Trigger task execution on a local device.
+
+    This function routes a task to a local device for execution instead of
+    using the cloud executor manager. The device will execute the task and
+    report progress/completion via WebSocket.
+
+    Args:
+        task: Task TaskResource object
+        assistant_subtask: Assistant subtask for AI response
+        team: Team Kind object
+        user: User object
+        payload: Original chat send payload (must have device_id)
+        task_room: Task room name for WebSocket events
+        user_subtask_id: Optional user subtask ID for context processing
+        auth_token: JWT token for API authentication
+    """
+    from app.db.session import SessionLocal
+    from app.services.chat.ws_emitter import get_ws_emitter
+    from app.services.device_router import route_task_to_device
+
+    device_id = getattr(payload, "device_id", None)
+    if not device_id:
+        logger.error(
+            "[ai_trigger] Device execution requested but no device_id provided"
+        )
+        return
+
+    logger.info(
+        "[ai_trigger] Routing task to device: task_id=%d, subtask_id=%d, device_id=%s",
+        task.id,
+        assistant_subtask.id,
+        device_id,
+    )
+
+    # Get user subtask for context retrieval
+    user_subtask = None
+    if user_subtask_id:
+        db = SessionLocal()
+        try:
+            from app.models.subtask import Subtask as SubtaskModel
+
+            user_subtask = (
+                db.query(SubtaskModel)
+                .filter(SubtaskModel.id == user_subtask_id)
+                .first()
+            )
+        finally:
+            db.close()
+
+    # Emit chat:start event to inform frontend that AI is processing
+    # For device execution, shell_type is ClaudeCode since devices run Claude Code SDK
+    ws_emitter = get_ws_emitter()
+    if ws_emitter:
+        await ws_emitter.emit_chat_start(
+            task_id=task.id,
+            subtask_id=assistant_subtask.id,
+            message_id=assistant_subtask.message_id,
+            shell_type="ClaudeCode",
+        )
+
+    # Route task to device
+    db = SessionLocal()
+    try:
+        await route_task_to_device(
+            db=db,
+            user_id=user.id,
+            device_id=device_id,
+            task=task,
+            subtask=assistant_subtask,
+            team=team,
+            user=user,
+            auth_token=auth_token,
+            user_subtask=user_subtask,
+        )
+        logger.info(
+            "[ai_trigger] Task successfully routed to device: task_id=%d, device_id=%s",
+            task.id,
+            device_id,
+        )
+    except Exception as e:
+        logger.error(
+            "[ai_trigger] Failed to route task to device: task_id=%d, device_id=%s, error=%s",
+            task.id,
+            device_id,
+            e,
+        )
+        # Mark subtask as FAILED so subsequent messages can be sent
+        assistant_subtask.status = SubtaskStatus.FAILED
+        assistant_subtask.error_message = str(e)
+        db.commit()
+
+        # Emit error to frontend
+        if ws_emitter:
+            await ws_emitter.emit_chat_error(
+                task_id=task.id,
+                subtask_id=assistant_subtask.id,
+                error=str(e),
+                message_id=assistant_subtask.message_id,
+            )
     finally:
         db.close()

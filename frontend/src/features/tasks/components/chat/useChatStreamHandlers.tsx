@@ -7,13 +7,14 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useTaskContext } from '../../contexts/taskContext'
 import { useChatStreamContext, computeIsStreaming } from '../../contexts/chatStreamContext'
 import { useSocket } from '@/contexts/SocketContext'
+import { useDevices } from '@/contexts/DeviceContext'
 import { useToast } from '@/hooks/use-toast'
 import { useTranslation } from '@/hooks/useTranslation'
 import { useUser } from '@/features/common/UserContext'
 import { useTraceAction } from '@/hooks/useTraceAction'
 import { parseError, getErrorDisplayMessage } from '@/utils/errorParser'
 import { taskApis } from '@/apis/tasks'
-import { isChatShell } from '../../service/messageService'
+import { isChatShell, teamRequiresWorkspace } from '../../service/messageService'
 import { Button } from '@/components/ui/button'
 import { DEFAULT_MODEL_NAME } from '../selector/ModelSelector'
 import type { Model } from '../selector/ModelSelector'
@@ -29,6 +30,8 @@ export interface UseChatStreamHandlersOptions {
   selectedRepo: GitRepoInfo | null
   selectedBranch: GitBranch | null
   showRepositorySelector: boolean
+  /** Effective requires workspace value (considering user override) */
+  effectiveRequiresWorkspace?: boolean
 
   // Input
   taskInputMessage: string
@@ -50,7 +53,7 @@ export interface UseChatStreamHandlersOptions {
   isAttachmentReadyToSend: boolean
 
   // Task type
-  taskType: 'chat' | 'code' | 'knowledge'
+  taskType: 'chat' | 'code' | 'knowledge' | 'task'
 
   // Knowledge base ID (for knowledge type tasks)
   knowledgeBaseId?: number
@@ -139,6 +142,7 @@ export function useChatStreamHandlers({
   selectedRepo,
   selectedBranch,
   showRepositorySelector,
+  effectiveRequiresWorkspace,
   taskInputMessage,
   setTaskInputMessage,
   setIsLoading,
@@ -177,6 +181,9 @@ export function useChatStreamHandlers({
   } = useChatStreamContext()
 
   const { retryMessage } = useSocket()
+
+  // Get selected device ID for executor-based tasks
+  const { selectedDeviceId } = useDevices()
 
   // Local state
   const [pendingTaskId, setPendingTaskId] = useState<number | null>(null)
@@ -405,7 +412,12 @@ export function useChatStreamHandlers({
             }
           : null)
 
-      if (taskType === 'code' && showRepositorySelector && !effectiveRepo?.git_repo) {
+      if (
+        taskType === 'code' &&
+        showRepositorySelector &&
+        (effectiveRequiresWorkspace ?? teamRequiresWorkspace(selectedTeam)) &&
+        !effectiveRepo?.git_repo
+      ) {
         toast({
           variant: 'destructive',
           title: 'Please select a repository for code tasks',
@@ -552,6 +564,8 @@ export function useChatStreamHandlers({
             task_type: taskType,
             knowledge_base_id: taskType === 'knowledge' ? knowledgeBaseId : undefined,
             contexts: contextItems.length > 0 ? contextItems : undefined,
+            // Device ID for local device execution (only for executor-based teams, not Chat Shell)
+            device_id: !isChatShell(selectedTeam) ? selectedDeviceId || undefined : undefined,
           },
           {
             pendingUserMessage: message,
@@ -640,6 +654,7 @@ export function useChatStreamHandlers({
       externalApiParams,
       onTaskCreated,
       selectedDocumentIds,
+      selectedDeviceId,
     ]
   )
 
@@ -680,7 +695,12 @@ export function useChatStreamHandlers({
             }
           : null)
 
-      if (taskType === 'code' && showRepositorySelector && !effectiveRepo?.git_repo) {
+      if (
+        taskType === 'code' &&
+        showRepositorySelector &&
+        (effectiveRequiresWorkspace ?? teamRequiresWorkspace(selectedTeam)) &&
+        !effectiveRepo?.git_repo
+      ) {
         toast({
           variant: 'destructive',
           title: t('common:selector.repository') || 'Please select a repository for code tasks',

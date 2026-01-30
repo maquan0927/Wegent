@@ -61,6 +61,39 @@ class ContextService:
     # Image file extensions supported for vision models
     IMAGE_EXTENSIONS = frozenset([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"])
 
+    # ==================== Helper Methods ====================
+
+    @staticmethod
+    def format_file_size(size_bytes: int) -> str:
+        """
+        Format file size in bytes to human-readable format.
+
+        Args:
+            size_bytes: File size in bytes
+
+        Returns:
+            Formatted string like "2.5 MB", "156.3 KB", or "512 bytes"
+        """
+        if size_bytes >= 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        elif size_bytes >= 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes} bytes"
+
+    @staticmethod
+    def build_attachment_url(attachment_id: int) -> str:
+        """
+        Build the download URL for an attachment.
+
+        Args:
+            attachment_id: Attachment ID
+
+        Returns:
+            Relative URL path for downloading the attachment
+        """
+        return f"/api/attachments/{attachment_id}/download"
+
     # ==================== Attachment Operations ====================
 
     def upload_attachment(
@@ -348,6 +381,8 @@ class ContextService:
         Note: This method returns raw content without XML tags. The caller is responsible
         for wrapping multiple attachments in a single <attachment> XML tag.
 
+        Includes attachment metadata (id, filename, mime_type, file_size, url).
+
         Args:
             context: SubtaskContext record with extracted_text
             attachment_index: Optional attachment index for labeling (e.g., 1 for "Attachment 1")
@@ -362,24 +397,29 @@ class ContextService:
         max_text_length = DocumentParser.get_max_text_length()
         is_truncated = context.text_length >= max_text_length
 
-        # Build the content parts
-        parts = []
+        # Build attachment metadata header
+        attachment_id = context.id
+        filename = context.original_filename
+        mime_type = context.mime_type or "unknown"
+        file_size = context.file_size or 0
+        formatted_size = self.format_file_size(file_size)
+        url = self.build_attachment_url(attachment_id)
 
-        # Add attachment index label if provided
-        if attachment_index is not None:
-            parts.append(f"[Attachment {attachment_index}]")
-
-        parts.append(f"[File Content - {context.original_filename}]:")
+        # Build the prefix with metadata and optional truncation notice
+        prefix = (
+            f"[Attachment: {filename} | ID: {attachment_id} | "
+            f"Type: {mime_type} | Size: {formatted_size} | URL: {url}]\n"
+        )
 
         if is_truncated:
-            parts.append(
+            prefix += (
                 f"(Note: The file content is too long and has been truncated to "
-                f"{max_text_length} characters. The following is only partial content.)"
+                f"{max_text_length} characters. The following is only partial content.)\n"
             )
 
-        parts.append(context.extracted_text)
+        prefix += context.extracted_text
 
-        return "\n".join(parts)
+        return prefix
 
     def build_message_with_attachment(
         self,
