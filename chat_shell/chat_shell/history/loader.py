@@ -459,11 +459,18 @@ def _build_history_message(
                     break
 
         # Combine all text parts with XML tags:
-        # - attachments wrapped in <attachment> tag
+        # - attachments (text documents AND image headers) wrapped in <attachment> tag
         # - knowledge bases wrapped in <knowledge_base> tag
         combined_prefix = ""
-        if attachment_text_parts:
-            combined_prefix += "<attachment>\n" + "".join(attachment_text_parts) + "</attachment>\n\n"
+
+        # For image attachments, include image_metadata_headers in the attachment tag
+        # This ensures image metadata is also wrapped within <attachment> tag
+        all_attachment_parts = attachment_text_parts.copy()
+        if image_metadata_headers:
+            all_attachment_parts.extend(image_metadata_headers)
+
+        if all_attachment_parts:
+            combined_prefix += "<attachment>\n" + "".join(all_attachment_parts) + "</attachment>\n\n"
         if kb_text_parts:
             combined_prefix += "<knowledge_base>\n" + "".join(kb_text_parts) + "</knowledge_base>\n\n"
 
@@ -471,10 +478,6 @@ def _build_history_message(
             text_content = f"{combined_prefix}{text_content}"
 
         if vision_parts:
-            # Add image metadata headers to text content for reference
-            if image_metadata_headers:
-                headers_text = "\n\n".join(image_metadata_headers) + "\n\n"
-                text_content = f"{headers_text}{text_content}"
             return {
                 "role": "user",
                 "content": [{"type": "text", "text": text_content}, *vision_parts],
