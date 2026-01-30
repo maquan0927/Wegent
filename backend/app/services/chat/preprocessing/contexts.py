@@ -168,17 +168,24 @@ def _build_vision_structure(
     Returns:
         Vision structure dictionary
     """
-    combined_text = ""
-    if text_contents:
-        # Wrap all attachment contents in a single <attachment> XML tag
-        combined_text = (
-            "<attachment>\n" + "\n\n".join(text_contents) + "\n</attachment>\n\n"
-        )
+    # Collect all attachment content parts (text documents and image headers)
+    all_attachment_parts = []
 
-    # Add image metadata headers to text
+    # Add text attachment contents
+    if text_contents:
+        all_attachment_parts.extend(text_contents)
+
+    # Add image metadata headers (inside the attachment tag)
     for img in image_contents:
         if "image_header" in img:
-            combined_text += img["image_header"] + "\n\n"
+            all_attachment_parts.append(img["image_header"])
+
+    # Build combined text with all attachments wrapped in a single <attachment> tag
+    combined_text = ""
+    if all_attachment_parts:
+        combined_text = (
+            "<attachment>\n" + "\n\n".join(all_attachment_parts) + "\n</attachment>\n\n"
+        )
 
     combined_text += f"[User Question]:\n{message}"
 
