@@ -7,7 +7,7 @@
 /**
  * Subscription creation/edit form component.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Copy, Check, Terminal, Brain, ChevronDown, Eye, EyeOff } from 'lucide-react'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Button } from '@/components/ui/button'
@@ -56,6 +56,7 @@ import { CronSchedulePicker } from './CronSchedulePicker'
 import { RepositorySelector, BranchSelector } from '@/features/tasks/components/selector'
 import { DateTimePicker } from '@/components/ui/date-time-picker'
 import { cn, parseUTCDate } from '@/lib/utils'
+import { getCompatibleProviderFromAgentType } from '@/utils/modelCompatibility'
 
 // Model type for selector
 interface SubscriptionModel {
@@ -64,6 +65,30 @@ interface SubscriptionModel {
   provider?: string
   modelId?: string
   type?: string
+}
+
+const resolveGitType = (gitDomain?: string): GitRepoInfo['type'] => {
+  if (!gitDomain) return 'github'
+  if (gitDomain.includes('gitlab')) return 'gitlab'
+  if (gitDomain.includes('gitee')) return 'gitee'
+  if (gitDomain.endsWith('github.com')) return 'github'
+  return 'github'
+}
+
+const buildRepoInfoFromSubscription = (subscription: Subscription): GitRepoInfo | null => {
+  if (!subscription.git_repo) return null
+  const gitDomain = subscription.git_domain || 'github.com'
+  const repoName = subscription.git_repo.split('/').pop() || subscription.git_repo
+
+  return {
+    git_repo_id: subscription.git_repo_id ?? 0,
+    name: repoName,
+    git_repo: subscription.git_repo,
+    git_url: `https://${gitDomain}/${subscription.git_repo}.git`,
+    git_domain: gitDomain,
+    private: false,
+    type: resolveGitType(gitDomain),
+  }
 }
 
 /**
@@ -201,6 +226,20 @@ interface SubscriptionFormProps {
   onOpenChange: (open: boolean) => void
   subscription?: Subscription | null
   onSuccess: () => void
+  /** Initial form data for prefilling (from scheme URL or other sources) */
+  initialData?: Partial<{
+    displayName: string
+    description: string
+    taskType: SubscriptionTaskType
+    triggerType: SubscriptionTriggerType
+    triggerConfig: Record<string, unknown>
+    promptTemplate: string
+    retryCount: number
+    timeoutSeconds: number
+    enabled: boolean
+    preserveHistory: boolean
+    visibility: SubscriptionVisibility
+  }>
 }
 
 // Get user's local timezone (e.g., 'Asia/Shanghai', 'America/New_York')
@@ -224,25 +263,33 @@ export function SubscriptionForm({
   onOpenChange,
   subscription,
   onSuccess,
+  initialData,
 }: SubscriptionFormProps) {
   const { t } = useTranslation('feed')
   const isEditing = !!subscription
+  const isRental = subscription?.is_rental ?? false
 
   // Form state
-  const [displayName, setDisplayName] = useState('')
-  const [description, setDescription] = useState('')
-  const [taskType, setTaskType] = useState<SubscriptionTaskType>('collection')
-  const [triggerType, setTriggerType] = useState<SubscriptionTriggerType>('cron')
+  const [displayName, setDisplayName] = useState(initialData?.displayName || '')
+  const [description, setDescription] = useState(initialData?.description || '')
+  const [taskType, setTaskType] = useState<SubscriptionTaskType>(
+    initialData?.taskType || 'collection'
+  )
+  const [triggerType, setTriggerType] = useState<SubscriptionTriggerType>(
+    initialData?.triggerType || 'cron'
+  )
   const [triggerConfig, setTriggerConfig] = useState<Record<string, unknown>>(
-    defaultTriggerConfig.cron
+    initialData?.triggerConfig || defaultTriggerConfig.cron
   )
   const [teamId, setTeamId] = useState<number | null>(null)
-  const [promptTemplate, setPromptTemplate] = useState('')
-  const [retryCount, setRetryCount] = useState(0)
-  const [timeoutSeconds, setTimeoutSeconds] = useState(600) // Default 10 minutes
-  const [enabled, setEnabled] = useState(true)
-  const [preserveHistory, setPreserveHistory] = useState(false) // History preservation
-  const [visibility, setVisibility] = useState<SubscriptionVisibility>('private') // Visibility setting
+  const [promptTemplate, setPromptTemplate] = useState(initialData?.promptTemplate || '')
+  const [retryCount, setRetryCount] = useState(initialData?.retryCount ?? 0)
+  const [timeoutSeconds, setTimeoutSeconds] = useState(initialData?.timeoutSeconds ?? 600) // Default 10 minutes
+  const [enabled, setEnabled] = useState(initialData?.enabled ?? true)
+  const [preserveHistory, setPreserveHistory] = useState(initialData?.preserveHistory ?? false) // History preservation
+  const [visibility, setVisibility] = useState<SubscriptionVisibility>(
+    initialData?.visibility || 'private'
+  ) // Visibility setting
 
   // Model selection state
   const [selectedModel, setSelectedModel] = useState<SubscriptionModel | null>(null)
@@ -250,6 +297,7 @@ export function SubscriptionForm({
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelSelectorOpen, setModelSelectorOpen] = useState(false)
   const [modelSearchValue, setModelSearchValue] = useState('')
+  const promptTemplateRef = useRef<HTMLTextAreaElement>(null)
 
   // Repository/Branch state for code-type teams
   const [selectedRepo, setSelectedRepo] = useState<GitRepoInfo | null>(null)
@@ -296,16 +344,19 @@ export function SubscriptionForm({
       setModelsLoading(true)
       try {
         const response = await modelApis.getUnifiedModels(undefined, false, 'all')
-        const modelList: SubscriptionModel[] = response.data.map((m: UnifiedModel) => ({
+        console.log('Loaded models response:', response)
+        const modelList: SubscriptionModel[] = (response.data || []).map((m: UnifiedModel) => ({
           name: m.name,
           displayName: m.displayName,
           provider: m.provider || undefined,
           modelId: m.modelId || undefined,
           type: m.type,
         }))
+        console.log('Processed model list:', modelList)
         setModels(modelList)
       } catch (error) {
         console.error('Failed to load models:', error)
+        toast.error(t('common:errors.load_failed'))
       } finally {
         setModelsLoading(false)
       }
@@ -313,7 +364,7 @@ export function SubscriptionForm({
     if (open) {
       loadModels()
     }
-  }, [open])
+  }, [open, t])
 
   // Get selected team
   const selectedTeam = teams.find(t => t.id === teamId)
@@ -336,8 +387,22 @@ export function SubscriptionForm({
     })
   })()
 
-  // Determine if model selection is required (team has no model and user hasn't selected one)
-  const modelRequired = !teamHasModel && !selectedModel
+  const compatibleProvider = getCompatibleProviderFromAgentType(selectedTeam?.agent_type)
+
+  // Determine if model selection is required
+  // For rental subscriptions: model is REQUIRED (must select a model to use)
+  // For non-rental: required only if team has no model configured
+  const modelRequired = isRental ? !selectedModel : !teamHasModel && !selectedModel
+  const promptVariables = [
+    '{{date}}',
+    '{{time}}',
+    '{{datetime}}',
+    '{{subscription_name}}',
+    '{{webhook_data}}',
+  ]
+  const promptVariablesHint = t('prompt_variables_hint')
+  const promptVariablesLabel = promptVariablesHint.split(/[:：]/)[0]?.trim() || promptVariablesHint
+  const promptVariablesDelimiter = promptVariablesHint.includes('：') ? '：' : ':'
 
   // Handle repository change
   const handleRepoChange = useCallback((repo: GitRepoInfo | null) => {
@@ -348,6 +413,27 @@ export function SubscriptionForm({
   // Handle branch change
   const handleBranchChange = useCallback((branch: GitBranch | null) => {
     setSelectedBranch(branch)
+  }, [])
+
+  const handleInsertPromptVariable = useCallback((variable: string) => {
+    const textarea = promptTemplateRef.current
+    if (!textarea) {
+      setPromptTemplate(prevValue => `${prevValue}${variable}`)
+      return
+    }
+
+    const currentValue = textarea.value
+    const selectionStart = textarea.selectionStart ?? currentValue.length
+    const selectionEnd = textarea.selectionEnd ?? currentValue.length
+    const nextValue =
+      currentValue.slice(0, selectionStart) + variable + currentValue.slice(selectionEnd)
+
+    setPromptTemplate(nextValue)
+    requestAnimationFrame(() => {
+      textarea.focus()
+      const caretPosition = selectionStart + variable.length
+      textarea.setSelectionRange(caretPosition, caretPosition)
+    })
   }, [])
 
   // Handle team change - reset repo/branch when team changes
@@ -374,10 +460,17 @@ export function SubscriptionForm({
       setEnabled(subscription.enabled)
       setPreserveHistory(subscription.preserve_history || false)
       setVisibility(subscription.visibility || 'private')
-      // Note: workspace_id restoration will be handled when we have workspace API
-      // For now, reset repo selection
-      setSelectedRepo(null)
-      setSelectedBranch(null)
+      const repoInfo = buildRepoInfoFromSubscription(subscription)
+      setSelectedRepo(repoInfo)
+      setSelectedBranch(
+        repoInfo && subscription.branch_name
+          ? {
+              name: subscription.branch_name,
+              protected: false,
+              default: false,
+            }
+          : null
+      )
       // Restore model selection from subscription
       if (subscription.model_ref) {
         setSelectedModel({
@@ -388,23 +481,26 @@ export function SubscriptionForm({
         setSelectedModel(null)
       }
     } else {
-      setDisplayName('')
-      setDescription('')
-      setTaskType('collection')
-      setTriggerType('cron')
-      setTriggerConfig(defaultTriggerConfig.cron)
+      // Use initialData if provided, otherwise use defaults
+      setDisplayName(initialData?.displayName || '')
+      setDescription(initialData?.description || '')
+      setTaskType(initialData?.taskType || 'collection')
+      setTriggerType(initialData?.triggerType || 'cron')
+      setTriggerConfig(
+        initialData?.triggerConfig || defaultTriggerConfig[initialData?.triggerType || 'cron']
+      )
       setTeamId(null)
-      setPromptTemplate('')
-      setRetryCount(0)
-      setTimeoutSeconds(600)
-      setEnabled(true)
-      setPreserveHistory(false)
-      setVisibility('private')
+      setPromptTemplate(initialData?.promptTemplate || '')
+      setRetryCount(initialData?.retryCount ?? 0)
+      setTimeoutSeconds(initialData?.timeoutSeconds ?? 600)
+      setEnabled(initialData?.enabled ?? true)
+      setPreserveHistory(initialData?.preserveHistory ?? false)
+      setVisibility(initialData?.visibility || 'private')
       setSelectedRepo(null)
       setSelectedBranch(null)
       setSelectedModel(null)
     }
-  }, [subscription, open])
+  }, [subscription, open, initialData])
 
   // Update selected model display name when models load
   useEffect(() => {
@@ -429,51 +525,68 @@ export function SubscriptionForm({
       toast.error(t('validation_display_name_required'))
       return
     }
-    if (!teamId) {
-      toast.error(t('validation_team_required'))
-      return
-    }
-    if (!promptTemplate.trim()) {
-      toast.error(t('validation_prompt_required'))
-      return
-    }
 
-    // Check if model is required but not selected
-    // Find the team to check if it has model configured
-    const team = teams.find(t => t.id === teamId)
-    const hasTeamModel = team?.bots?.some(teamBot => {
-      const agentConfig = teamBot.bot?.agent_config
-      return agentConfig && !!(agentConfig as Record<string, unknown>).bind_model
-    })
+    // For rental subscriptions: model is REQUIRED
+    if (isRental) {
+      if (!selectedModel) {
+        toast.error(t('validation_model_required'))
+        return
+      }
+    } else {
+      // For non-rental subscriptions: team, prompt, and model (if team has no model) are required
+      if (!teamId) {
+        toast.error(t('validation_team_required'))
+        return
+      }
+      if (!promptTemplate.trim()) {
+        toast.error(t('validation_prompt_required'))
+        return
+      }
 
-    if (!hasTeamModel && !selectedModel) {
-      toast.error(t('validation_model_required'))
-      return
+      // Check if model is required but not selected
+      // Find the team to check if it has model configured
+      const team = teams.find(t => t.id === teamId)
+      const hasTeamModel = team?.bots?.some(teamBot => {
+        const agentConfig = teamBot.bot?.agent_config
+        return agentConfig && !!(agentConfig as Record<string, unknown>).bind_model
+      })
+
+      if (!hasTeamModel && !selectedModel) {
+        toast.error(t('validation_model_required'))
+        return
+      }
     }
 
     setSubmitting(true)
     try {
       if (isEditing && subscription) {
+        // For rental subscriptions, only update allowed fields (not team, prompt, visibility)
         const updateData: SubscriptionUpdateRequest = {
           display_name: displayName,
           description: description || undefined,
           task_type: taskType,
           trigger_type: triggerType,
           trigger_config: triggerConfig,
-          team_id: teamId,
-          prompt_template: promptTemplate,
           retry_count: retryCount,
           timeout_seconds: timeoutSeconds,
           enabled,
           preserve_history: preserveHistory,
-          visibility,
-          // Include git repo info if selected
-          ...(selectedRepo && {
-            git_repo: selectedRepo.git_repo,
-            git_repo_id: selectedRepo.git_repo_id,
-            git_domain: selectedRepo.git_domain,
-            branch_name: selectedBranch?.name || 'main',
-          }),
+          // Only include team_id, prompt_template, visibility for non-rental subscriptions
+          ...(isRental
+            ? {}
+            : {
+                team_id: teamId ?? undefined,
+                prompt_template: promptTemplate,
+                visibility,
+              }),
+          // Include git repo info if selected (only for non-rental)
+          ...(!isRental &&
+            selectedRepo && {
+              git_repo: selectedRepo.git_repo,
+              git_repo_id: selectedRepo.git_repo_id,
+              git_domain: selectedRepo.git_domain,
+              branch_name: selectedBranch?.name || 'main',
+            }),
           // Include model selection - always override bot model when specified
           model_ref: selectedModel ? { name: selectedModel.name, namespace: 'default' } : undefined,
           force_override_bot_model: !!selectedModel, // Always override when model is selected
@@ -496,7 +609,7 @@ export function SubscriptionForm({
           task_type: taskType,
           trigger_type: triggerType,
           trigger_config: triggerConfig,
-          team_id: teamId,
+          team_id: teamId!,
           prompt_template: promptTemplate,
           retry_count: retryCount,
           timeout_seconds: timeoutSeconds,
@@ -543,6 +656,7 @@ export function SubscriptionForm({
     selectedBranch,
     selectedModel,
     isEditing,
+    isRental,
     subscription,
     onSuccess,
     onOpenChange,
@@ -551,7 +665,11 @@ export function SubscriptionForm({
   ])
 
   // Filter models based on search
-  const filteredModels = models.filter(model => {
+  const compatibleModels = compatibleProvider
+    ? models.filter(model => model.provider === compatibleProvider)
+    : models
+
+  const filteredModels = compatibleModels.filter(model => {
     const searchLower = modelSearchValue.toLowerCase()
     return (
       model.name.toLowerCase().includes(searchLower) ||
@@ -559,6 +677,16 @@ export function SubscriptionForm({
       (model.provider && model.provider.toLowerCase().includes(searchLower))
     )
   })
+
+  // Clear incompatible model selection when team changes
+  useEffect(() => {
+    if (!selectedModel || !compatibleProvider) return
+    const matchedModel = models.find(model => model.name === selectedModel.name)
+    const resolvedProvider = matchedModel?.provider || selectedModel.provider
+    if (resolvedProvider && resolvedProvider !== compatibleProvider) {
+      setSelectedModel(null)
+    }
+  }, [compatibleProvider, models, selectedModel])
 
   const renderTriggerConfig = () => {
     switch (triggerType) {
@@ -783,28 +911,30 @@ export function SubscriptionForm({
                 </Select>
               </div>
 
-              {/* Team Selection */}
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">
-                  {t('select_team')} <span className="text-destructive">*</span>
-                </Label>
-                <Select
-                  value={teamId?.toString() || ''}
-                  onValueChange={handleTeamChange}
-                  disabled={teamsLoading}
-                >
-                  <SelectTrigger className="h-10">
-                    <SelectValue placeholder={t('select_team_placeholder')} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {teams.map(team => (
-                      <SelectItem key={team.id} value={team.id.toString()}>
-                        {team.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {/* Team Selection - Hidden for rental subscriptions */}
+              {!isRental && (
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">
+                    {t('select_team')} <span className="text-destructive">*</span>
+                  </Label>
+                  <Select
+                    value={teamId?.toString() || ''}
+                    onValueChange={handleTeamChange}
+                    disabled={teamsLoading}
+                  >
+                    <SelectTrigger className="h-10">
+                      <SelectValue placeholder={t('select_team_placeholder')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {teams.map(team => (
+                        <SelectItem key={team.id} value={team.id.toString()}>
+                          {team.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               {/* Repository Selection - Only show for code-type teams */}
               {isCodeTypeTeam && (
@@ -877,14 +1007,26 @@ export function SubscriptionForm({
                         <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                       </Button>
                     </PopoverTrigger>
-                    <PopoverContent className="w-[400px] p-0" align="start">
-                      <Command>
+                    <PopoverContent
+                      className={cn(
+                        'w-[400px] p-0',
+                        'max-h-[var(--radix-popover-content-available-height,360px)]',
+                        'flex flex-col overflow-hidden'
+                      )}
+                      align="start"
+                    >
+                      <Command className="flex flex-col flex-1 min-h-0">
                         <CommandInput
                           placeholder={t('search_model')}
                           value={modelSearchValue}
                           onValueChange={setModelSearchValue}
                         />
-                        <CommandList>
+                        <CommandList
+                          className="min-h-[36px] max-h-[240px] overflow-y-auto flex-1"
+                          onWheel={event => {
+                            event.stopPropagation()
+                          }}
+                        >
                           <CommandEmpty>{t('no_model_found')}</CommandEmpty>
                           <CommandGroup>
                             {/* Option to clear selection */}
@@ -948,33 +1090,47 @@ export function SubscriptionForm({
                 </div>
                 <Switch checked={preserveHistory} onCheckedChange={setPreserveHistory} />
               </div>
-              {/* Visibility */}
-              <div className="space-y-2 pt-2">
-                <Label className="text-sm font-medium">{t('visibility')}</Label>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant={visibility === 'private' ? 'primary' : 'outline'}
-                    size="sm"
-                    onClick={() => setVisibility('private')}
-                    className="flex-1"
-                  >
-                    <EyeOff className="h-4 w-4 mr-1.5" />
-                    {t('visibility_private')}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={visibility === 'public' ? 'primary' : 'outline'}
-                    size="sm"
-                    onClick={() => setVisibility('public')}
-                    className="flex-1"
-                  >
-                    <Eye className="h-4 w-4 mr-1.5" />
-                    {t('visibility_public')}
-                  </Button>
+              {/* Visibility - Hidden for rental subscriptions */}
+              {!isRental && (
+                <div className="space-y-2 pt-2">
+                  <Label className="text-sm font-medium">{t('visibility')}</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={visibility === 'private' ? 'primary' : 'outline'}
+                      size="sm"
+                      onClick={() => setVisibility('private')}
+                      className="flex-1"
+                    >
+                      <EyeOff className="h-4 w-4 mr-1.5" />
+                      {t('visibility_private')}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={visibility === 'public' ? 'primary' : 'outline'}
+                      size="sm"
+                      onClick={() => setVisibility('public')}
+                      className="flex-1"
+                    >
+                      <Eye className="h-4 w-4 mr-1.5" />
+                      {t('visibility_public')}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={visibility === 'market' ? 'primary' : 'outline'}
+                      size="sm"
+                      onClick={() => setVisibility('market')}
+                      className="flex-1"
+                    >
+                      <Eye className="h-4 w-4 mr-1.5" />
+                      {t('visibility_market')}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-text-muted">
+                    {visibility === 'market' ? t('visibility_market_hint') : t('visibility_hint')}
+                  </p>
                 </div>
-                <p className="text-xs text-text-muted">{t('visibility_hint')}</p>
-              </div>
+              )}
 
               {/* Enabled */}
               <div className="flex items-center justify-between pt-2">
@@ -1071,27 +1227,50 @@ export function SubscriptionForm({
             </div>
           </div>
 
-          {/* Full Width - Prompt Template */}
-          <div className="mt-6 pt-6 border-t border-border/50">
-            <div className="pb-3">
-              <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-                {t('prompt_config') || 'Prompt 配置'}
-              </h3>
+          {/* Full Width - Prompt Template - Hidden for rental subscriptions */}
+          {!isRental && (
+            <div className="mt-6 pt-6 border-t border-border/50">
+              <div className="pb-3">
+                <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
+                  {t('prompt_config') || 'Prompt 配置'}
+                </h3>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">
+                  {t('prompt_template')} <span className="text-destructive">*</span>
+                </Label>
+                <Textarea
+                  ref={promptTemplateRef}
+                  value={promptTemplate}
+                  onChange={e => setPromptTemplate(e.target.value)}
+                  placeholder={t('prompt_template_placeholder')}
+                  rows={5}
+                  className="resize-none"
+                />
+                <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                  <span>
+                    {promptVariablesLabel}
+                    {promptVariablesDelimiter}
+                  </span>
+                  {promptVariables.map(variable => (
+                    <Button
+                      key={variable}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className={cn(
+                        'h-7 px-2 text-[11px] rounded-full border-border',
+                        'bg-surface text-text-secondary hover:text-text-primary hover:bg-hover'
+                      )}
+                      onClick={() => handleInsertPromptVariable(variable)}
+                    >
+                      {variable}
+                    </Button>
+                  ))}
+                </div>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">
-                {t('prompt_template')} <span className="text-destructive">*</span>
-              </Label>
-              <Textarea
-                value={promptTemplate}
-                onChange={e => setPromptTemplate(e.target.value)}
-                placeholder={t('prompt_template_placeholder')}
-                rows={5}
-                className="resize-none"
-              />
-              <p className="text-xs text-text-muted">{t('prompt_variables_hint')}</p>
-            </div>
-          </div>
+          )}
         </div>
 
         <DialogFooter className="pt-4 border-t border-border gap-3">

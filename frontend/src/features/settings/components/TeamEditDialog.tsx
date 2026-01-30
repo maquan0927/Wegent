@@ -70,8 +70,12 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [mode, setMode] = useState<TeamMode>('solo')
-  const [bindMode, setBindMode] = useState<('chat' | 'code' | 'knowledge')[]>(['chat', 'code'])
+  const [bindMode, setBindMode] = useState<('chat' | 'code' | 'knowledge' | 'task')[]>([
+    'chat',
+    'code',
+  ])
   const [icon, setIcon] = useState<string | null>(null)
+  const [requiresWorkspace, setRequiresWorkspace] = useState<boolean | null>(null)
 
   // Bot selection state
   const [selectedBotKeys, setSelectedBotKeys] = useState<React.Key[]>([])
@@ -188,6 +192,9 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
         }
       })
       setRequireConfirmationMap(confirmMap)
+      // Initialize requiresWorkspace from existing team data
+      // Default to true for legacy data that doesn't have this field
+      setRequiresWorkspace(formTeam.requires_workspace ?? true)
     } else {
       setName('')
       setDescription('')
@@ -197,6 +204,8 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
       setSelectedBotKeys([])
       setLeaderBotId(null)
       setRequireConfirmationMap({})
+      // Default to true for new teams (requires workspace by default)
+      setRequiresWorkspace(true)
     }
     setUnsavedPrompts({})
   }, [open, formTeam])
@@ -405,6 +414,7 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
               bots: botsData,
               namespace: scope === 'group' && groupName ? groupName : undefined,
               icon: icon || undefined,
+              requires_workspace: requiresWorkspace ?? undefined,
             })
             setTeams(prev => prev.map(team => (team.id === updated.id ? updated : team)))
           } else {
@@ -416,6 +426,7 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
               bots: botsData,
               namespace: scope === 'group' && groupName ? groupName : undefined,
               icon: icon || undefined,
+              requires_workspace: requiresWorkspace ?? undefined,
             })
             setTeams(prev => [created, ...prev])
           }
@@ -486,6 +497,7 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
           bots: botsData,
           namespace: scope === 'group' && groupName ? groupName : undefined,
           icon: icon || undefined,
+          requires_workspace: requiresWorkspace ?? undefined,
         })
         setTeams(prev => prev.map(team => (team.id === updated.id ? updated : team)))
       } else {
@@ -497,6 +509,7 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
           bots: botsData,
           namespace: scope === 'group' && groupName ? groupName : undefined,
           icon: icon || undefined,
+          requires_workspace: requiresWorkspace ?? undefined,
         })
         setTeams(prev => [created, ...prev])
       }
@@ -539,6 +552,8 @@ export default function TeamEditDialog(props: TeamEditDialogProps) {
               setBindMode={setBindMode}
               icon={icon}
               setIcon={setIcon}
+              requiresWorkspace={requiresWorkspace}
+              setRequiresWorkspace={setRequiresWorkspace}
             />
 
             {/* Mode Selection Section */}

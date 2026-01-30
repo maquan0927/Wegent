@@ -68,6 +68,7 @@ class ChatRequest:
     # Bot configuration
     bot_name: str = ""
     bot_namespace: str = ""
+    timezone: str = "Asia/Shanghai"  # User timezone for CreateSubscriptionTool
     skills: list = field(default_factory=list)  # Skill metadata for prompt injection
 
     # Skill configuration for dynamic tool loading
@@ -102,6 +103,14 @@ class ChatRequest:
 
     # History limit for subscription tasks
     history_limit: Optional[int] = None  # Max number of history messages to load
+
+    # Authentication
+    auth_token: str = (
+        ""  # JWT token for API authentication (e.g., attachment upload/download)
+    )
+
+    # Subscription task flag - when True, SilentExitTool will be added
+    is_subscription: bool = False
 
 
 @dataclass

@@ -38,9 +38,11 @@ from app.services.subscription.execution import (
 from app.services.subscription.helpers import (
     build_subscription_crd,
     build_trigger_config,
+    build_workspace_repo_cache,
     calculate_next_execution_time,
     create_or_get_workspace,
     extract_trigger_config,
+    resolve_workspace_repo_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,7 +181,7 @@ class SubscriptionService:
         db.commit()
         db.refresh(subscription)
 
-        return self._convert_to_subscription_in_db(subscription)
+        return self._convert_to_subscription_in_db(subscription, db=db)
 
     def get_subscription(
         self,
@@ -203,7 +205,7 @@ class SubscriptionService:
         if not subscription:
             raise HTTPException(status_code=404, detail="Subscription not found")
 
-        return self._convert_to_subscription_in_db(subscription)
+        return self._convert_to_subscription_in_db(subscription, db=db)
 
     def list_subscriptions(
         self,
@@ -215,30 +217,34 @@ class SubscriptionService:
         enabled: Optional[bool] = None,
         trigger_type: Optional[SubscriptionTriggerType] = None,
     ) -> Tuple[List[SubscriptionInDB], int]:
-        """List user's Subscriptions with pagination."""
+        """List user's Subscriptions with pagination.
+
+        Note: This method excludes rental subscriptions (is_rental=True).
+        Rental subscriptions should be accessed via the market API.
+        """
         query = db.query(Kind).filter(
             Kind.user_id == user_id,
             Kind.kind == "Subscription",
             Kind.is_active == True,
         )
 
+        # Get all subscriptions first to filter by JSON fields
+        all_subscriptions = query.order_by(desc(Kind.updated_at)).all()
+
+        # Filter out rental subscriptions (is_rental=True)
+        subscriptions = [
+            s
+            for s in all_subscriptions
+            if not s.json.get("_internal", {}).get("is_rental", False)
+        ]
+
         # Filter by enabled status if specified
         if enabled is not None:
-            # We need to filter by the _internal.enabled field in JSON
-            # This is a workaround since we store enabled in JSON
-            subscriptions = query.all()
-            filtered = []
-            for s in subscriptions:
-                internal = s.json.get("_internal", {})
-                if internal.get("enabled", True) == enabled:
-                    filtered.append(s)
-            total = len(filtered)
-            subscriptions = filtered[skip : skip + limit]
-        else:
-            total = query.count()
-            subscriptions = (
-                query.order_by(desc(Kind.updated_at)).offset(skip).limit(limit).all()
-            )
+            subscriptions = [
+                s
+                for s in subscriptions
+                if s.json.get("_internal", {}).get("enabled", True) == enabled
+            ]
 
         # Filter by trigger_type if specified
         if trigger_type is not None:
@@ -247,9 +253,21 @@ class SubscriptionService:
                 for s in subscriptions
                 if s.json.get("_internal", {}).get("trigger_type") == trigger_type.value
             ]
-            total = len(subscriptions)
 
-        return [self._convert_to_subscription_in_db(s) for s in subscriptions], total
+        total = len(subscriptions)
+        subscriptions = subscriptions[skip : skip + limit]
+
+        workspace_ids = [
+            s.json.get("_internal", {}).get("workspace_id") for s in subscriptions
+        ]
+        workspace_repo_cache = build_workspace_repo_cache(db, workspace_ids)
+
+        return [
+            self._convert_to_subscription_in_db(
+                s, db=db, workspace_repo_cache=workspace_repo_cache
+            )
+            for s in subscriptions
+        ], total
 
     def update_subscription(
         self,
@@ -319,6 +337,37 @@ class SubscriptionService:
                     name=workspace.name, namespace=workspace.namespace
                 )
                 internal["workspace_id"] = update_data["workspace_id"]
+            else:
+                subscription_crd.spec.workspaceRef = None
+                internal["workspace_id"] = 0
+        elif any(
+            key in update_data
+            for key in ("git_repo", "git_repo_id", "git_domain", "branch_name")
+        ):
+            git_repo = update_data.get("git_repo")
+            if git_repo:
+                workspace_id = create_or_get_workspace(
+                    db,
+                    user_id=user_id,
+                    git_repo=git_repo,
+                    git_repo_id=update_data.get("git_repo_id"),
+                    git_domain=update_data.get("git_domain") or "github.com",
+                    branch_name=update_data.get("branch_name") or "main",
+                )
+                workspace = (
+                    db.query(TaskResource)
+                    .filter(
+                        TaskResource.id == workspace_id,
+                        TaskResource.kind == "Workspace",
+                        TaskResource.is_active == True,
+                    )
+                    .first()
+                )
+                if workspace:
+                    subscription_crd.spec.workspaceRef = SubscriptionWorkspaceRef(
+                        name=workspace.name, namespace=workspace.namespace
+                    )
+                    internal["workspace_id"] = workspace.id
             else:
                 subscription_crd.spec.workspaceRef = None
                 internal["workspace_id"] = 0
@@ -449,7 +498,7 @@ class SubscriptionService:
         db.commit()
         db.refresh(subscription)
 
-        return self._convert_to_subscription_in_db(subscription)
+        return self._convert_to_subscription_in_db(subscription, db=db)
 
     def delete_subscription(
         self,
@@ -533,7 +582,7 @@ class SubscriptionService:
         db.commit()
         db.refresh(subscription)
 
-        return self._convert_to_subscription_in_db(subscription)
+        return self._convert_to_subscription_in_db(subscription, db=db)
 
     def trigger_subscription_manually(
         self,
@@ -727,7 +776,12 @@ class SubscriptionService:
         return calculate_next_execution_time(trigger_type, trigger_config)
 
     def _convert_to_subscription_in_db(
-        self, subscription: Kind, current_user_id: Optional[int] = None
+        self,
+        subscription: Kind,
+        current_user_id: Optional[int] = None,
+        *,
+        db: Optional[Session] = None,
+        workspace_repo_cache: Optional[Dict[int, Dict[str, Optional[Any]]]] = None,
     ) -> SubscriptionInDB:
         """Convert Kind to SubscriptionInDB."""
         from app.schemas.subscription import SubscriptionVisibility
@@ -774,6 +828,32 @@ class SubscriptionService:
             subscription_crd.spec, "visibility", SubscriptionVisibility.PRIVATE
         )
 
+        # Get rental-related fields from _internal
+        is_rental = internal.get("is_rental", False)
+        source_subscription_id = internal.get("source_subscription_id")
+        source_subscription_name = internal.get("source_subscription_name")
+        source_subscription_display_name = internal.get(
+            "source_subscription_display_name"
+        )
+        source_owner_username = internal.get("source_owner_username")
+        rental_count = internal.get("rental_count", 0)
+        workspace_repo_fields = (
+            resolve_workspace_repo_fields(
+                db,
+                user_id=subscription.user_id,
+                workspace_id=internal.get("workspace_id"),
+                workspace_ref=subscription_crd.spec.workspaceRef,
+                workspace_repo_cache=workspace_repo_cache,
+            )
+            if db
+            else {
+                "git_repo": None,
+                "git_repo_id": None,
+                "git_domain": None,
+                "branch_name": None,
+            }
+        )
+
         return SubscriptionInDB(
             id=subscription.id,
             user_id=subscription.user_id,
@@ -787,6 +867,10 @@ class SubscriptionService:
             trigger_config=extract_trigger_config(subscription_crd.spec.trigger),
             team_id=internal.get("team_id", 0),
             workspace_id=internal.get("workspace_id", 0),
+            git_repo=workspace_repo_fields.get("git_repo"),
+            git_repo_id=workspace_repo_fields.get("git_repo_id"),
+            git_domain=workspace_repo_fields.get("git_domain"),
+            branch_name=workspace_repo_fields.get("branch_name"),
             model_ref=model_ref,
             force_override_bot_model=subscription_crd.spec.forceOverrideBotModel,
             prompt_template=subscription_crd.spec.promptTemplate,
@@ -809,6 +893,13 @@ class SubscriptionService:
             followers_count=0,
             is_following=False,
             owner_username=None,
+            # Market rental fields
+            is_rental=is_rental,
+            source_subscription_id=source_subscription_id,
+            source_subscription_name=source_subscription_name,
+            source_subscription_display_name=source_subscription_display_name,
+            source_owner_username=source_owner_username,
+            rental_count=rental_count,
             created_at=subscription.created_at,
             updated_at=subscription.updated_at,
         )

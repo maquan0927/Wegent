@@ -25,11 +25,13 @@ from app.schemas.knowledge import (
     AccessibleKnowledgeResponse,
     BatchDocumentIds,
     BatchOperationResult,
+    DocumentContentUpdate,
     DocumentDetailResponse,
     DocumentSourceType,
     KnowledgeBaseCreate,
     KnowledgeBaseListResponse,
     KnowledgeBaseResponse,
+    KnowledgeBaseTypeUpdate,
     KnowledgeBaseUpdate,
     KnowledgeDocumentCreate,
     KnowledgeDocumentListResponse,
@@ -38,7 +40,11 @@ from app.schemas.knowledge import (
     ResourceScope,
 )
 from app.schemas.knowledge_qa_history import QAHistoryResponse
-from app.schemas.rag import SplitterConfig
+from app.schemas.rag import (
+    SemanticSplitterConfig,
+    SentenceSplitterConfig,
+    SplitterConfig,
+)
 from app.services.adapters.retriever_kinds import retriever_kinds_service
 from app.services.knowledge import (
     KnowledgeBaseQAService,
@@ -47,6 +53,7 @@ from app.services.knowledge import (
 )
 from app.services.rag.document_service import DocumentService
 from app.services.rag.storage.factory import create_storage_backend
+from shared.telemetry.decorators import trace_sync
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +129,20 @@ def get_accessible_knowledge(
         db=db,
         user_id=current_user.id,
     )
+
+
+@router.get("/config")
+@trace_sync("get_knowledge_config", "knowledge.api")
+def get_knowledge_config():
+    """
+    Get knowledge base configuration.
+
+    Returns system-level configuration for knowledge base features.
+    This is used by frontend to determine which features are enabled.
+    """
+    return {
+        "chunk_storage_enabled": settings.CHUNK_STORAGE_ENABLED,
+    }
 
 
 @router.post(
@@ -255,6 +276,44 @@ def delete_knowledge_base(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+
+
+@router.patch("/{knowledge_base_id}/type", response_model=KnowledgeBaseResponse)
+def update_knowledge_base_type(
+    knowledge_base_id: int,
+    data: KnowledgeBaseTypeUpdate,
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Update the knowledge base type (notebook <-> classic conversion).
+
+    - Converting to 'notebook': Requires document count <= 50
+    - Converting to 'classic': No restrictions
+    """
+    try:
+        knowledge_base = KnowledgeService.update_knowledge_base_type(
+            db=db,
+            knowledge_base_id=knowledge_base_id,
+            user_id=current_user.id,
+            new_type=data.kb_type,
+        )
+
+        if not knowledge_base:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Knowledge base not found or access denied",
+            )
+
+        return KnowledgeBaseResponse.from_kind(
+            knowledge_base,
+            KnowledgeService.get_document_count(db, knowledge_base.id),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
 
@@ -513,6 +572,41 @@ def _resolve_kb_index_info(
         return kb_info
 
 
+def _parse_splitter_config(config_dict: dict) -> Optional[SplitterConfig]:
+    """
+    Parse a dictionary into the appropriate SplitterConfig type.
+
+    Since SplitterConfig is a Union type (Union[SemanticSplitterConfig, SentenceSplitterConfig, SmartSplitterConfig]),
+    it cannot be instantiated directly. This function determines the correct type based on
+    the 'type' field in the config dictionary.
+
+    Args:
+        config_dict: Dictionary containing splitter configuration
+
+    Returns:
+        SemanticSplitterConfig, SentenceSplitterConfig, or SmartSplitterConfig instance,
+        or None if invalid
+    """
+    from app.schemas.rag import SmartSplitterConfig
+
+    if not config_dict:
+        return None
+
+    splitter_type = config_dict.get("type")
+    if splitter_type == "semantic":
+        return SemanticSplitterConfig(**config_dict)
+    elif splitter_type == "sentence":
+        return SentenceSplitterConfig(**config_dict)
+    elif splitter_type == "smart":
+        return SmartSplitterConfig(**config_dict)
+    else:
+        # Default to sentence splitter if type is not specified or unknown
+        logger.warning(
+            f"Unknown splitter type '{splitter_type}', defaulting to sentence splitter"
+        )
+        return SentenceSplitterConfig(**config_dict)
+
+
 def _trigger_document_summary_if_enabled(
     db: Session,
     document_id: int,
@@ -670,6 +764,7 @@ def _index_document_background(
         )
 
         # Update document is_active to True and status to enabled after successful indexing
+        # Also save chunk metadata to document if CHUNK_STORAGE_ENABLED is True
         if document_id:
             from app.models.knowledge import DocumentStatus, KnowledgeDocument
 
@@ -681,6 +776,21 @@ def _index_document_background(
             if doc:
                 doc.is_active = True
                 doc.status = DocumentStatus.ENABLED
+                # Save chunk metadata from indexing result only if CHUNK_STORAGE_ENABLED is True
+                # When disabled (default), chunks are only stored in vector database for retrieval
+                if settings.CHUNK_STORAGE_ENABLED:
+                    chunks_data = result.get("chunks_data")
+                    if chunks_data:
+                        doc.chunks = chunks_data
+                        logger.info(
+                            f"Saved {chunks_data.get('total_count', 0)} chunks metadata "
+                            f"for document {document_id}"
+                        )
+                else:
+                    logger.info(
+                        f"Skipping chunk storage for document {document_id} "
+                        "(CHUNK_STORAGE_ENABLED=False)"
+                    )
                 db.commit()
                 logger.info(
                     f"Updated document {document_id} is_active to True and status to enabled after successful indexing"
@@ -782,7 +892,197 @@ def delete_document(
         )
 
 
+@document_router.put("/{document_id}/content")
+async def update_document_content(
+    document_id: int,
+    data: DocumentContentUpdate,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Update document content (TEXT type only).
+
+    Updates the extracted_text field and triggers RAG re-indexing.
+    Only Owner or Maintainer of the knowledge base can update documents.
+
+    Returns:
+        Success message with document_id
+    """
+    from app.models.knowledge import KnowledgeDocument
+
+    try:
+        # Update document content via service
+        document = KnowledgeService.update_document_content(
+            db=db,
+            document_id=document_id,
+            content=data.content,
+            user_id=current_user.id,
+        )
+
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found or access denied",
+            )
+
+        # Get knowledge base to check for retrieval_config and trigger RAG re-indexing
+        knowledge_base = KnowledgeService.get_knowledge_base(
+            db=db,
+            knowledge_base_id=document.kind_id,
+            user_id=current_user.id,
+        )
+
+        if knowledge_base:
+            spec = knowledge_base.json.get("spec", {})
+            retrieval_config = spec.get("retrievalConfig")
+
+            if retrieval_config:
+                # Extract configuration using snake_case format
+                retriever_name = retrieval_config.get("retriever_name")
+                retriever_namespace = retrieval_config.get(
+                    "retriever_namespace", "default"
+                )
+                embedding_config = retrieval_config.get("embedding_config")
+
+                if retriever_name and embedding_config:
+                    # Extract embedding model info
+                    embedding_model_name = embedding_config.get("model_name")
+                    embedding_model_namespace = embedding_config.get(
+                        "model_namespace", "default"
+                    )
+
+                    # Pre-compute KB index info
+                    summary_enabled = spec.get("summaryEnabled", False)
+                    if knowledge_base.namespace == "default":
+                        index_owner_user_id = current_user.id
+                    else:
+                        index_owner_user_id = knowledge_base.user_id
+
+                    kb_index_info = KnowledgeBaseIndexInfo(
+                        index_owner_user_id=index_owner_user_id,
+                        summary_enabled=summary_enabled,
+                    )
+
+                    # Schedule RAG re-indexing in background
+                    background_tasks.add_task(
+                        _index_document_background,
+                        knowledge_base_id=str(document.kind_id),
+                        attachment_id=document.attachment_id,
+                        retriever_name=retriever_name,
+                        retriever_namespace=retriever_namespace,
+                        embedding_model_name=embedding_model_name,
+                        embedding_model_namespace=embedding_model_namespace,
+                        user_id=current_user.id,
+                        user_name=current_user.user_name,
+                        splitter_config=(
+                            _parse_splitter_config(document.splitter_config)
+                            if document.splitter_config
+                            else None
+                        ),
+                        document_id=document.id,
+                        kb_index_info=kb_index_info,
+                    )
+                    logger.info(
+                        f"Scheduled RAG re-indexing for document {document.id} after content update"
+                    )
+
+        return {
+            "success": True,
+            "document_id": document.id,
+            "message": "Document content updated successfully",
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
 # ============== Batch Document Operations ==============
+
+
+@document_router.get("/{document_id}/detail")
+@trace_sync("get_document_detail_standalone", "knowledge.api")
+def get_document_detail_standalone(
+    document_id: int,
+    include_content: bool = Query(True, description="Include document content"),
+    include_summary: bool = Query(True, description="Include document summary"),
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Get document detail (content and/or summary) without requiring knowledge base ID.
+
+    This is a convenience endpoint for getting document content when the kb_id
+    is not readily available (e.g., in citation tooltips).
+    """
+    from app.models.knowledge import KnowledgeDocument
+
+    # Get document
+    document = (
+        db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document_id).first()
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Check access permission via knowledge base
+    kb = KnowledgeService.get_knowledge_base(
+        db=db,
+        knowledge_base_id=document.kind_id,
+        user_id=current_user.id,
+    )
+    if not kb:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this document",
+        )
+
+    # Get content if requested
+    content = None
+    content_length = None
+    truncated = False
+
+    if include_content and document.attachment_id:
+        try:
+            from app.services.context import context_service
+
+            attachment = context_service.get_context_by_id(
+                db=db,
+                context_id=document.attachment_id,
+            )
+            if attachment and attachment.extracted_text:
+                full_content = attachment.extracted_text
+                content_length = len(full_content)
+                # Truncate if too large
+                max_length = 100000
+                if content_length > max_length:
+                    content = full_content[:max_length]
+                    truncated = True
+                else:
+                    content = full_content
+        except Exception as e:
+            logger.warning(f"Failed to get document content: {e}")
+
+    # Build response
+    response = {
+        "document_id": document_id,
+    }
+
+    if include_content:
+        response["content"] = content
+        response["content_length"] = content_length
+        response["truncated"] = truncated
+
+    if include_summary:
+        response["summary"] = document.summary
+
+    return response
 
 
 @document_router.post("/batch/delete", response_model=BatchOperationResult)
@@ -1327,3 +1627,142 @@ def _update_kb_summary_after_deletion(kb_id: int, user_id: int, user_name: str):
     finally:
         db.close()
         logger.info(f"[KnowledgeAPI] KB summary update task completed: kb_id={kb_id}")
+
+
+# ============== Chunk Management Endpoints ==============
+
+
+@document_router.get("/{document_id}/chunks")
+@trace_sync("list_document_chunks", "knowledge.api")
+def list_document_chunks(
+    document_id: int,
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Page size"),
+    search: Optional[str] = Query(None, description="Search keyword"),
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    List chunks for a document with pagination and optional search.
+
+    Returns paginated chunk list with content and metadata.
+    """
+    from app.models.knowledge import KnowledgeDocument
+    from app.schemas.knowledge import ChunkItem, ChunkListResponse
+
+    # Get document with access check
+    document = (
+        db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document_id).first()
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Check access permission via knowledge base
+    kb = KnowledgeService.get_knowledge_base(
+        db=db,
+        knowledge_base_id=document.kind_id,
+        user_id=current_user.id,
+    )
+    if not kb:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this document",
+        )
+
+    # Get chunks from document
+    chunks_data = document.chunks or {}
+    all_items = chunks_data.get("items", [])
+
+    # Apply search filter if provided
+    if search:
+        search_lower = search.lower()
+        all_items = [
+            item
+            for item in all_items
+            if search_lower in item.get("content", "").lower()
+        ]
+
+    # Pagination
+    total = len(all_items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated_items = all_items[start:end]
+
+    return ChunkListResponse(
+        total=total,
+        page=page,
+        page_size=page_size,
+        items=[ChunkItem(**item) for item in paginated_items],
+        splitter_type=chunks_data.get("splitter_type"),
+        splitter_subtype=chunks_data.get("splitter_subtype"),
+    )
+
+
+@document_router.get("/{document_id}/chunks/{chunk_index}")
+@trace_sync("get_document_chunk", "knowledge.api")
+def get_document_chunk(
+    document_id: int,
+    chunk_index: int,
+    current_user: User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Get a single chunk by index.
+
+    Returns full chunk content for citation hover display.
+    """
+    from app.models.knowledge import KnowledgeDocument
+    from app.schemas.knowledge import ChunkResponse
+
+    # Get document
+    document = (
+        db.query(KnowledgeDocument).filter(KnowledgeDocument.id == document_id).first()
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Check access permission via knowledge base
+    kb = KnowledgeService.get_knowledge_base(
+        db=db,
+        knowledge_base_id=document.kind_id,
+        user_id=current_user.id,
+    )
+    if not kb:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this document",
+        )
+
+    # Get chunk by index
+    chunks_data = document.chunks or {}
+    items = chunks_data.get("items", [])
+
+    # Find chunk by index
+    chunk = None
+    for item in items:
+        if item.get("index") == chunk_index:
+            chunk = item
+            break
+
+    if not chunk:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Chunk with index {chunk_index} not found",
+        )
+
+    return ChunkResponse(
+        index=chunk.get("index", chunk_index),
+        content=chunk.get("content", ""),
+        token_count=chunk.get("token_count", 0),
+        document_name=document.name,
+        document_id=document.id,
+        kb_id=document.kind_id,
+    )

@@ -35,6 +35,36 @@ from .team_builder import TeamBuilder
 from .thinking_step_manager import ThinkingStepManager
 
 db = SqliteDb(db_file="/tmp/agno_data.db")
+
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles non-serializable objects from agno library."""
+
+    def default(self, obj: Any) -> Any:
+        # Handle objects with __dict__ attribute
+        if hasattr(obj, "__dict__"):
+            return str(obj)
+        # Handle objects with model_dump method (Pydantic models)
+        if hasattr(obj, "model_dump"):
+            return str(obj)
+        # Handle objects with to_dict method
+        if hasattr(obj, "to_dict"):
+            return str(obj)
+        # Fallback: convert to string representation
+        try:
+            return str(obj)
+        except Exception:
+            return f"<non-serializable: {type(obj).__name__}>"
+
+
+def _safe_json_dumps(obj: Any, ensure_ascii: bool = False) -> str:
+    """Safely serialize object to JSON string, never raising exceptions."""
+    try:
+        return json.dumps(obj, ensure_ascii=ensure_ascii, cls=SafeJSONEncoder)
+    except Exception as e:
+        return f"<serialization failed: {e}>"
+
+
 logger = setup_logger("agno_agent")
 
 
@@ -135,6 +165,10 @@ class AgnoAgent(Agent):
 
         # Initialize resource manager for resource cleanup
         self.resource_manager = ResourceManager()
+
+        # Silent exit tracking for subscription tasks
+        self.is_silent_exit: bool = False
+        self.silent_exit_reason: str = ""
 
     def add_thinking_step(
         self,
@@ -331,6 +365,10 @@ class AgnoAgent(Agent):
                 ).dict(),
             )
 
+            # Check if this is a subscription task - subscription tasks need to wait for completion
+            # so the container can exit properly after task finishes
+            is_subscription = self.task_data.get("is_subscription", False)
+
             # Check if currently running in coroutine
             try:
                 # Try to get current running event loop
@@ -340,12 +378,37 @@ class AgnoAgent(Agent):
                 logger.info(
                     "Detected running in an async context, calling execute_async"
                 )
-                # Create async task to run in background, but return PENDING instead of task object
-                asyncio.create_task(self.execute_async())
-                logger.info(
-                    "Created async task for execution, returning RUNNING status"
-                )
-                return TaskStatus.RUNNING
+
+                if is_subscription:
+                    # For subscription tasks, we need to wait for completion
+                    # so the container can exit with proper status
+                    logger.info(
+                        "Subscription task detected, waiting for async execution to complete"
+                    )
+                    import concurrent.futures
+
+                    def run_async_task():
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        try:
+                            return new_loop.run_until_complete(self._async_execute())
+                        finally:
+                            new_loop.close()
+
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(run_async_task)
+                        result = future.result()
+                        logger.info(
+                            f"Subscription task async execution completed with status: {result}"
+                        )
+                        return result
+                else:
+                    # For non-subscription tasks, create background task and return immediately
+                    asyncio.create_task(self.execute_async())
+                    logger.info(
+                        "Created async task for execution, returning RUNNING status"
+                    )
+                    return TaskStatus.RUNNING
             except RuntimeError:
                 # No running event loop, can safely use run_until_complete
                 logger.info("No running event loop detected, using new event loop")
@@ -504,7 +567,7 @@ class AgnoAgent(Agent):
             elif hasattr(result, "content") and getattr(result, "content") is not None:
                 result_content = str(getattr(result, "content"))
             elif hasattr(result, "to_dict"):
-                result_content = json.dumps(result.to_dict(), ensure_ascii=False)
+                result_content = _safe_json_dumps(result.to_dict())
             else:
                 result_content = str(result)
         except Exception:
@@ -539,15 +602,28 @@ class AgnoAgent(Agent):
                 if self.accumulated_reasoning_content
                 else None
             )
+
+            # Build execution result
+            exec_result = ExecutionResult(
+                value=result_content,
+                thinking=self.thinking_manager.get_thinking_steps(),
+                reasoning_content=reasoning_content,
+            ).dict()
+
+            # Add silent_exit flag if silent exit was detected
+            if self.is_silent_exit:
+                exec_result["silent_exit"] = True
+                if self.silent_exit_reason:
+                    exec_result["silent_exit_reason"] = self.silent_exit_reason
+                logger.info(
+                    f"🔇 Adding silent_exit flag to result: reason={self.silent_exit_reason}"
+                )
+
             self.report_progress(
                 100,
                 TaskStatus.COMPLETED.value,
                 f"${{thinking.execution_completed}} {execution_type}",
-                result=ExecutionResult(
-                    value=result_content,
-                    thinking=self.thinking_manager.get_thinking_steps(),
-                    reasoning_content=reasoning_content,
-                ).dict(),
+                result=exec_result,
             )
             return TaskStatus.COMPLETED
         else:
@@ -598,7 +674,7 @@ class AgnoAgent(Agent):
 
     async def _handle_agent_streaming_event(
         self, run_response_event, result_content: str
-    ) -> str:
+    ) -> Tuple[str, bool]:
         """
         Handle agent streaming events
 
@@ -607,7 +683,8 @@ class AgnoAgent(Agent):
             result_content: Current result content
 
         Returns:
-            str: Updated result content
+            Tuple[str, bool]: (Updated result content, should_break flag)
+                - should_break is True when silent_exit is detected and execution should stop
         """
         # Handle agent run events
         if run_response_event.event in [RunEvent.run_started]:
@@ -672,6 +749,18 @@ class AgnoAgent(Agent):
             tool_result = run_response_event.tool.result
             logger.info(f"✅ AGENT TOOL COMPLETED: {tool_name}")
             logger.info(f"   Result: {tool_result[:100] if tool_result else 'None'}...")
+
+            # Check for silent exit marker in tool result
+            if tool_result:
+                from executor.tools.silent_exit import detect_silent_exit
+
+                is_silent, reason = detect_silent_exit(tool_result)
+                if is_silent:
+                    logger.info(f"🔇 Silent exit detected: reason={reason}")
+                    self.is_silent_exit = True
+                    self.silent_exit_reason = reason
+                    # Return immediately to break out of the streaming loop
+                    return result_content, True
 
             # Build tool result details in target format
             tool_result_details = {
@@ -811,7 +900,9 @@ class AgnoAgent(Agent):
                         ).dict(),
                     )
 
-        return result_content
+        # Return tuple: (result_content, should_break)
+        # should_break is False by default, only True when silent_exit is detected
+        return result_content, False
 
     def _get_team_config(self) -> Dict[str, Any]:
         """
@@ -883,7 +974,9 @@ class AgnoAgent(Agent):
                 debug_level=2,
             )
 
-            logger.info(f"agent run success. result:{json.dumps(result.to_dict())}")
+            logger.info(
+                f"agent run success. result:{_safe_json_dumps(result.to_dict())}"
+            )
             result_content = self._normalize_result_content(result)
             return self._handle_execution_result(result_content, "agent execution")
 
@@ -935,9 +1028,25 @@ class AgnoAgent(Agent):
                     logger.info(f"Task {self.task_id} cancelled during agent streaming")
                     return TaskStatus.COMPLETED
 
-                result_content = await self._handle_agent_streaming_event(
+                result_content, should_break = await self._handle_agent_streaming_event(
                     run_response_event, result_content
                 )
+
+                # Check if silent_exit was detected - break out of streaming loop
+                if should_break:
+                    logger.info(
+                        f"🔇 Silent exit detected, breaking out of agent streaming loop"
+                    )
+                    # Cancel the current run to stop further processing
+                    if self.current_run_id and self.single_agent:
+                        try:
+                            self.single_agent.cancel_run(self.current_run_id)
+                            logger.info(
+                                f"Cancelled agent run {self.current_run_id} due to silent_exit"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel agent run: {e}")
+                    break
 
             # Check if task was cancelled
             if self.task_state_manager.is_cancelled(self.task_id):
@@ -1000,7 +1109,7 @@ class AgnoAgent(Agent):
             )
 
             logger.info(
-                f"team run success. result:{json.dumps(result.to_dict(), ensure_ascii=False)}"
+                f"team run success. result:{_safe_json_dumps(result.to_dict())}"
             )
             result_content = self._normalize_result_content(result)
             return self._handle_execution_result(result_content, "team execution")
@@ -1054,11 +1163,29 @@ class AgnoAgent(Agent):
                     logger.info(f"Task {self.task_id} cancelled during team streaming")
                     return TaskStatus.COMPLETED
 
-                result_content, reasoning = await self._handle_team_streaming_event(
-                    run_response_event, result_content
+                result_content, reasoning, should_break = (
+                    await self._handle_team_streaming_event(
+                        run_response_event, result_content
+                    )
                 )
                 # Thinking steps are already handled in _handle_team_streaming_event
                 # Here we only need to report progress, no need to add thinking again
+
+                # Check if silent_exit was detected - break out of streaming loop
+                if should_break:
+                    logger.info(
+                        f"🔇 Silent exit detected, breaking out of team streaming loop"
+                    )
+                    # Cancel the current run to stop further processing
+                    if self.current_run_id and self.team:
+                        try:
+                            self.team.cancel_run(self.current_run_id)
+                            logger.info(
+                                f"Cancelled team run {self.current_run_id} due to silent_exit"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel team run: {e}")
+                    break
 
             # Check if task was cancelled
             if self.task_state_manager.is_cancelled(self.task_id):
@@ -1073,7 +1200,7 @@ class AgnoAgent(Agent):
 
     async def _handle_team_streaming_event(
         self, run_response_event, result_content: str
-    ) -> Tuple[str, Optional[Any]]:
+    ) -> Tuple[str, Optional[Any], bool]:
         """
         Handle team streaming events
 
@@ -1082,7 +1209,8 @@ class AgnoAgent(Agent):
             result_content: Current result content
 
         Returns:
-            str: Updated result content
+            Tuple[str, Optional[Any], bool]: (Updated result content, reasoning, should_break flag)
+                - should_break is True when silent_exit is detected and execution should stop
         """
         reasoning = None
 
@@ -1091,7 +1219,7 @@ class AgnoAgent(Agent):
             and run_response_event.event != "RunContent"
         ):
             logger.info(
-                f"\nStreaming content: {json.dumps(run_response_event.to_dict(), ensure_ascii=False)}"
+                f"\nStreaming content: {_safe_json_dumps(run_response_event.to_dict())}"
             )
 
         if run_response_event.event == "TeamReasoningStep":
@@ -1196,6 +1324,18 @@ class AgnoAgent(Agent):
             tool_name = run_response_event.tool.tool_name
             tool_result = run_response_event.tool.result
             logger.info(f"\n✅ TEAM TOOL COMPLETED: {tool_name}")
+
+            # Check for silent exit marker in tool result
+            if tool_result:
+                from executor.tools.silent_exit import detect_silent_exit
+
+                is_silent, reason = detect_silent_exit(tool_result)
+                if is_silent:
+                    logger.info(f"🔇 Silent exit detected in team: reason={reason}")
+                    self.is_silent_exit = True
+                    self.silent_exit_reason = reason
+                    # Return immediately to break out of the streaming loop
+                    return result_content, reasoning, True
 
             # Build team tool result details in target format
             team_tool_result_details = {
@@ -1358,7 +1498,9 @@ class AgnoAgent(Agent):
                         ).dict(),
                     )
 
-        return result_content, reasoning
+        # Return tuple: (result_content, reasoning, should_break)
+        # should_break is False by default, only True when silent_exit is detected
+        return result_content, reasoning, False
 
     @classmethod
     async def close_client(cls, session_id: str) -> TaskStatus:

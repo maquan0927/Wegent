@@ -28,6 +28,8 @@ async function loadTranslations() {
     'promptTune',
     'feed',
     'projects',
+    'pet',
+    'devices',
   ]
 
   for (const lng of supportedLanguages) {
@@ -79,6 +81,8 @@ export async function initI18n() {
       'promptTune',
       'feed',
       'projects',
+      'pet',
+      'devices',
     ],
   })
 

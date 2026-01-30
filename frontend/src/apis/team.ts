@@ -12,10 +12,11 @@ export interface CreateTeamRequest {
   description?: string
   bots?: TeamBot[]
   workflow?: Record<string, unknown>
-  bind_mode?: ('chat' | 'code' | 'knowledge')[]
+  bind_mode?: ('chat' | 'code' | 'knowledge' | 'task')[]
   is_active?: boolean
   namespace?: string // Group namespace, defaults to 'default' for personal teams
   icon?: string // Icon ID from preset icon library
+  requires_workspace?: boolean // Whether this team requires a workspace/repository (null = auto-infer from shell)
 }
 
 export interface TeamListResponse {
