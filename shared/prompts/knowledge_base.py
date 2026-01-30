@@ -6,6 +6,11 @@
 
 This module provides prompt templates for knowledge base tool usage that are
 shared across backend and chat_shell modules.
+
+Usage:
+    These templates contain a {kb_meta_info} placeholder that should be replaced
+    with knowledge base metadata information using .format(kb_meta_info=...).
+    If no metadata is available, pass an empty string.
 """
 
 # Strict mode prompt: User explicitly selected KB for this message
@@ -31,6 +36,7 @@ The user has selected specific knowledge bases for this conversation. You MUST u
 - If unsure, search again with different keywords
 
 The user expects answers based on the selected knowledge base content only.
+{kb_meta_info}
 </knowledge_base>
 """
 
@@ -53,5 +59,6 @@ You have access to knowledge bases from previous conversations in this task. You
 - If the knowledge base doesn't contain relevant information, feel free to answer using your general knowledge
 - Clearly indicate when your answer is based on knowledge base content vs. general knowledge
 - The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information
+{kb_meta_info}
 </knowledge_base>
 """

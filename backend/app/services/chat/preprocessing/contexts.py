@@ -966,16 +966,21 @@ def _prepare_kb_tools_from_contexts(
 
     # Choose prompt template based on whether KB is user-selected or inherited from task
     # Use the shared prompts which already include XML tags
+    # Format the prompt with kb_meta_info inside the <knowledge_base> tags
     if is_user_selected_kb:
         # Strict mode: User explicitly selected KB for this message
-        kb_instruction = KB_PROMPT_STRICT + (f"\n{kb_meta_info}" if kb_meta_info else "")
+        kb_instruction = KB_PROMPT_STRICT.format(
+            kb_meta_info=f"\n{kb_meta_info}" if kb_meta_info else ""
+        )
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using STRICT mode prompt "
             "(user explicitly selected KB)"
         )
     else:
         # Relaxed mode: KB inherited from task, AI can use general knowledge as fallback
-        kb_instruction = KB_PROMPT_RELAXED + (f"\n{kb_meta_info}" if kb_meta_info else "")
+        kb_instruction = KB_PROMPT_RELAXED.format(
+            kb_meta_info=f"\n{kb_meta_info}" if kb_meta_info else ""
+        )
         logger.info(
             "[_prepare_kb_tools_from_contexts] Using RELAXED mode prompt "
             "(KB inherited from task)"
