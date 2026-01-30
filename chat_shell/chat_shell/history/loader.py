@@ -394,16 +394,22 @@ def _build_history_message(
         attachment_text_parts: list[str] = []
         total_attachment_text_length = 0
 
-        for attachment in attachments:
+        for idx, attachment in enumerate(attachments, start=1):
             vision_block = _build_vision_content_block(attachment)
             if vision_block:
                 vision_parts.append(vision_block)
+                # Also add text description for <attachment> tag
+                # This ensures image attachments are included in the attachment block
+                image_desc = _build_image_attachment_text_prefix(attachment, idx)
+                if image_desc:
+                    attachment_text_parts.append(image_desc)
+                    total_attachment_text_length += len(image_desc)
                 logger.info(
                     f"[history] Loaded image attachment: id={attachment.id}, "
                     f"name={attachment.name}, mime_type={attachment.mime_type}"
                 )
             else:
-                doc_prefix = _build_document_text_prefix(attachment)
+                doc_prefix = _build_document_text_prefix(attachment, idx)
                 if doc_prefix:
                     attachment_text_parts.append(doc_prefix)
                     total_attachment_text_length += len(doc_prefix)
@@ -501,17 +507,59 @@ def _build_vision_content_block(context) -> dict[str, Any] | None:
     }
 
 
-def _build_document_text_prefix(context) -> str:
+def _build_document_text_prefix(context, attachment_index: int | None = None) -> str:
     """Build a text prefix for a document context (without XML tags).
 
     Note: This returns raw content. The caller is responsible for wrapping
     multiple attachments in a single <attachment> XML tag.
+
+    Args:
+        context: The context record containing the document
+        attachment_index: Optional attachment index for labeling (e.g., 1 for "Attachment 1")
     """
     if not context.extracted_text:
         return ""
 
     name = context.name or "document"
-    return f"[Document: {name}]\n{context.extracted_text}\n\n"
+
+    parts = []
+    if attachment_index is not None:
+        parts.append(f"[Attachment {attachment_index}]")
+    parts.append(f"[File Content - {name}]:")
+    parts.append(context.extracted_text)
+
+    return "\n".join(parts) + "\n\n"
+
+
+def _build_image_attachment_text_prefix(context, attachment_index: int) -> str:
+    """Build a text prefix for an image attachment (without XML tags).
+
+    Note: This returns raw content. The caller is responsible for wrapping
+    multiple attachments in a single <attachment> XML tag.
+
+    Args:
+        context: The context record containing the image
+        attachment_index: Attachment index for labeling (e.g., 1 for "Attachment 1")
+    """
+    name = context.name or "image"
+    mime_type = context.mime_type or "image/unknown"
+
+    # Calculate file size
+    file_size = 0
+    if context.binary_data:
+        file_size = len(context.binary_data)
+
+    if file_size >= 1024 * 1024:
+        size_str = f"{file_size / (1024 * 1024):.1f} MB"
+    elif file_size >= 1024:
+        size_str = f"{file_size / 1024:.1f} KB"
+    else:
+        size_str = f"{file_size} B"
+
+    return (
+        f"[Attachment {attachment_index}]\n"
+        f"[Image Attachment: {name} | Type: {mime_type} | Size: {size_str}]\n\n"
+    )
 
 
 def _build_knowledge_base_text_prefix(context) -> str:
