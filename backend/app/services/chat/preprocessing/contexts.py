@@ -261,6 +261,10 @@ def _process_attachment_context(
     """
     Process an attachment context and add to appropriate list.
 
+    For image attachments, adds both:
+    1. A text description to text_contents (for <attachment> tag)
+    2. The image data to image_contents (for vision model)
+
     Args:
         context: The SubtaskContext record
         idx: Attachment index (for labeling)
@@ -269,6 +273,7 @@ def _process_attachment_context(
     """
     # Check if it's an image attachment
     if context_service.is_image_context(context) and context.image_base64:
+        # Add image data for vision model
         image_contents.append(
             {
                 "image_base64": context.image_base64,
@@ -276,6 +281,22 @@ def _process_attachment_context(
                 "filename": context.original_filename,
             }
         )
+        # Also add text description for <attachment> tag
+        # This ensures image attachments are included in the attachment block
+        file_size = context.type_data.get("file_size", 0) if context.type_data else 0
+        if file_size >= 1024 * 1024:
+            size_str = f"{file_size / (1024 * 1024):.1f} MB"
+        elif file_size >= 1024:
+            size_str = f"{file_size / 1024:.1f} KB"
+        else:
+            size_str = f"{file_size} B"
+
+        image_desc = (
+            f"[Attachment {idx}]\n"
+            f"[Image Attachment: {context.original_filename} | "
+            f"Type: {context.mime_type} | Size: {size_str}]"
+        )
+        text_contents.append(image_desc)
     else:
         # Text document - get formatted content with attachment index
         # The content is wrapped in <attachment> XML tags by context_service
