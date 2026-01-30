@@ -10,6 +10,7 @@ shared across backend and chat_shell modules.
 
 # Strict mode prompt: User explicitly selected KB for this message
 # AI must use KB only and cannot use general knowledge
+# Note: Use .format(kb_meta_list=...) to inject KB list content
 KB_PROMPT_STRICT = """
 
 <knowledge_base>
@@ -31,10 +32,11 @@ The user has selected specific knowledge bases for this conversation. You MUST u
 - If unsure, search again with different keywords
 
 The user expects answers based on the selected knowledge base content only.
-</knowledge_base>
+{kb_meta_list}</knowledge_base>
 """
 
 # Relaxed mode prompt: KB inherited from task, AI can use general knowledge as fallback
+# Note: Use .format(kb_meta_list=...) to inject KB list content
 KB_PROMPT_RELAXED = """
 
 <knowledge_base>
@@ -53,5 +55,5 @@ You have access to knowledge bases from previous conversations in this task. You
 - If the knowledge base doesn't contain relevant information, feel free to answer using your general knowledge
 - Clearly indicate when your answer is based on knowledge base content vs. general knowledge
 - The knowledge base is a helpful resource, but you are not limited to it when it doesn't have relevant information
-</knowledge_base>
+{kb_meta_list}</knowledge_base>
 """
