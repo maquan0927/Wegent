@@ -472,9 +472,10 @@ def _build_history_message(
 
         if vision_parts:
             # Add image metadata headers to text content for reference
+            # Wrap image metadata in <attachment> tag for consistency with first upload
             if image_metadata_headers:
-                headers_text = "\n\n".join(image_metadata_headers) + "\n\n"
-                text_content = f"{headers_text}{text_content}"
+                headers_text = "\n\n".join(image_metadata_headers)
+                text_content = f"<attachment>\n{headers_text}\n</attachment>\n\n{text_content}"
             return {
                 "role": "user",
                 "content": [{"type": "text", "text": text_content}, *vision_parts],
