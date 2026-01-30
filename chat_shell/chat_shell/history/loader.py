@@ -689,6 +689,8 @@ def get_knowledge_base_meta_prompt(
 
     kb_list_str = "\n".join(kb_lines)
 
+    # Return content without leading newline since the template handles formatting
+    # The content will be injected into the {kb_meta_list} placeholder in KB_PROMPT templates
     prompt = f"""
 Available Knowledge Bases (from conversation context):
 {kb_list_str}
