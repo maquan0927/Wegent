@@ -23,6 +23,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
+import time
 from typing import Any
 
 from langchain_core.tools.base import BaseTool
@@ -33,6 +34,7 @@ from langchain_mcp_adapters.sessions import (
     StreamableHttpConnection,
 )
 
+from chat_shell.core.config import settings
 from shared.telemetry.decorators import add_span_event, trace_async
 from shared.utils.mcp_utils import replace_mcp_server_variables
 from shared.utils.sensitive_data_masker import mask_sensitive_data
@@ -47,7 +49,9 @@ DEFAULT_TOOL_TIMEOUT = 60.0
 
 
 def wrap_tool_with_protection(
-    tool: BaseTool, timeout: float = DEFAULT_TOOL_TIMEOUT
+    tool: BaseTool,
+    timeout: float = DEFAULT_TOOL_TIMEOUT,
+    server_name: str = "unknown",
 ) -> BaseTool:
     """Wrap an MCP tool with timeout and exception protection.
 
@@ -55,10 +59,12 @@ def wrap_tool_with_protection(
     - Tool execution has a timeout limit
     - Exceptions don't crash the chat service
     - Failed tools return error messages instead of raising exceptions
+    - Prometheus metrics are recorded for each tool call
 
     Args:
         tool: Original MCP tool
         timeout: Timeout in seconds for tool execution
+        server_name: MCP server name for metrics labeling
 
     Returns:
         Protected tool instance
@@ -96,8 +102,26 @@ def wrap_tool_with_protection(
             return msg, None
         return msg
 
+    def _record_mcp_metrics(tool_name: str, status: str, duration: float) -> None:
+        """Record Prometheus metrics for MCP tool call."""
+        if settings.PROMETHEUS_ENABLED:
+            try:
+                from shared.prometheus.metrics.llm import get_mcp_metrics
+
+                metrics = get_mcp_metrics()
+                metrics.observe_request(
+                    server=server_name,
+                    tool=tool_name,
+                    status=status,
+                    duration_seconds=duration,
+                )
+            except Exception as e:
+                logger.debug("[MCP] Failed to record metrics: %s", e)
+
     def protected_run(*args, **kwargs):
         """Synchronous tool execution with protection."""
+        start_time = time.time()
+        status = "success"
         try:
             if original_run:
                 if run_accepts_config and "config" not in kwargs:
@@ -108,19 +132,27 @@ def wrap_tool_with_protection(
                     try:
                         return future.result(timeout=timeout)
                     except concurrent.futures.TimeoutError:
+                        status = "timeout"
                         error_msg = f"MCP tool '{tool.name}' timed out after {timeout}s"
                         logger.error("[MCP] %s", error_msg)
                         return _format_error(error_msg)
 
+            status = "error"
             return _format_error(
                 f"Error: Tool {tool.name} has no synchronous implementation"
             )
         except Exception as e:
+            status = "error"
             logger.exception("[MCP] MCP tool '%s' failed: %s", tool.name, e)
             return _format_error(f"MCP tool '{tool.name}' failed: {e!s}")
+        finally:
+            duration = time.time() - start_time
+            _record_mcp_metrics(tool.name, status, duration)
 
     async def protected_arun(*args, **kwargs):
         """Asynchronous tool execution with timeout and exception protection."""
+        start_time = time.time()
+        status = "success"
         try:
             if original_arun:
                 if arun_accepts_config and "config" not in kwargs:
@@ -130,14 +162,20 @@ def wrap_tool_with_protection(
                     original_arun(*args, **kwargs), timeout=timeout
                 )
                 return result
+            status = "error"
             return _format_error(f"Error: Tool {tool.name} has no async implementation")
         except asyncio.TimeoutError:
+            status = "timeout"
             error_msg = f"MCP tool '{tool.name}' timed out after {timeout}s"
             logger.error("[MCP] %s", error_msg)
             return _format_error(error_msg)
         except Exception as e:
+            status = "error"
             logger.exception("[MCP] MCP tool '%s' failed: %s", tool.name, e)
             return _format_error(f"MCP tool '{tool.name}' failed: {e!s}")
+        finally:
+            duration = time.time() - start_time
+            _record_mcp_metrics(tool.name, status, duration)
 
     if original_run:
         tool._run = protected_run
@@ -284,7 +322,6 @@ class MCPClient:
         # Load tools from each server individually to handle failures gracefully
         # This avoids the issue where one failing server causes all tools to fail
         add_span_event("loading_tools_started")
-        raw_tools: list[BaseTool] = []
         failed_servers: list[str] = []
         successful_servers: list[str] = []
 
@@ -330,12 +367,17 @@ class MCPClient:
                 )
             else:
                 successful_servers.append(server_name)
-                raw_tools.extend(tools)
+                # Wrap each tool with protection, including server_name for metrics
+                for tool in tools:
+                    wrapped_tool = wrap_tool_with_protection(
+                        tool, server_name=server_name
+                    )
+                    self._tools.append(wrapped_tool)
 
         add_span_event(
             "loading_tools_completed",
             {
-                "raw_tools_count": len(raw_tools),
+                "raw_tools_count": len(self._tools),
                 "successful_servers": successful_servers,
                 "failed_servers": failed_servers,
             },
@@ -349,9 +391,6 @@ class MCPClient:
                 ", ".join(failed_servers),
             )
 
-        # Wrap all tools with protection mechanisms
-        add_span_event("wrapping_tools_started")
-        self._tools = [wrap_tool_with_protection(tool) for tool in raw_tools]
         add_span_event(
             "wrapping_tools_completed", {"protected_tools_count": len(self._tools)}
         )
