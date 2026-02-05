@@ -391,6 +391,19 @@ def create_app(
 
     app.include_router(health_router)
 
+    # Setup Prometheus middleware if enabled
+    if settings.PROMETHEUS_ENABLED:
+        from shared.prometheus.middleware.fastapi import (
+            PrometheusMiddleware,
+            setup_prometheus_endpoint,
+        )
+
+        app.add_middleware(PrometheusMiddleware)
+        setup_prometheus_endpoint(app, settings.PROMETHEUS_METRICS_PATH)
+        logger.info(
+            f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}"
+        )
+
     # Root endpoint with basic info
     @app.get("/")
     async def root():
