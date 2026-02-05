@@ -180,6 +180,12 @@ def create_app(
         allow_headers=["*"],
     )
 
+    # Add Prometheus HTTP metrics middleware
+    from shared.prometheus import PrometheusMiddleware
+
+    app.add_middleware(PrometheusMiddleware)
+    logger.info("Prometheus HTTP metrics middleware enabled")
+
     # Get OTEL config early for use in middleware
     otel_config = get_otel_config("wegent-chat-shell")
 
@@ -390,6 +396,12 @@ def create_app(
     from chat_shell.api.health import router as health_router
 
     app.include_router(health_router)
+
+    # Add Prometheus metrics endpoint
+    from shared.prometheus import create_metrics_endpoint
+
+    app.include_router(create_metrics_endpoint())
+    logger.info("Prometheus /metrics endpoint registered")
 
     # Root endpoint with basic info
     @app.get("/")
