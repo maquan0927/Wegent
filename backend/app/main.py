@@ -609,6 +609,10 @@ def create_app():
         logger.info(
             f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}"
         )
+    else:
+        logger.debug(
+            "Prometheus metrics disabled. Set PROMETHEUS_ENABLED=true to enable."
+        )
 
     # Register exception handlers
     app.add_exception_handler(CustomHTTPException, http_exception_handler)

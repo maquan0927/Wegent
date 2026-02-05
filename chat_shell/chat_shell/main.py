@@ -403,6 +403,10 @@ def create_app(
         logger.info(
             f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}"
         )
+    else:
+        logger.debug(
+            "Prometheus metrics disabled. Set PROMETHEUS_ENABLED=true to enable."
+        )
 
     # Root endpoint with basic info
     @app.get("/")
