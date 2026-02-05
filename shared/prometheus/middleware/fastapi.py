@@ -151,7 +151,7 @@ def setup_prometheus_endpoint(app, path: str = None):
         app: FastAPI application instance
         path: Path for the metrics endpoint. If None, uses config value.
     """
-    from fastapi import Response
+    from fastapi import APIRouter, Response
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
     from shared.prometheus.registry import get_registry
@@ -159,7 +159,10 @@ def setup_prometheus_endpoint(app, path: str = None):
     config = get_prometheus_config()
     metrics_path = path or config.metrics_path
 
-    @app.get(metrics_path, include_in_schema=False)
+    # Create a dedicated router for metrics endpoint
+    metrics_router = APIRouter()
+
+    @metrics_router.get(metrics_path, include_in_schema=False)
     async def metrics():
         """Prometheus metrics endpoint."""
         registry = get_registry()
@@ -167,3 +170,6 @@ def setup_prometheus_endpoint(app, path: str = None):
             content=generate_latest(registry),
             media_type=CONTENT_TYPE_LATEST,
         )
+
+    # Include the router in the app
+    app.include_router(metrics_router)
