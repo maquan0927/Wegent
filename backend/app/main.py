@@ -597,6 +597,12 @@ def create_app():
         allow_headers=["*"],
     )
 
+    # Add Prometheus HTTP metrics middleware
+    from shared.prometheus import PrometheusMiddleware
+
+    app.add_middleware(PrometheusMiddleware)
+    logger.info("Prometheus HTTP metrics middleware enabled")
+
     # Register exception handlers
     app.add_exception_handler(CustomHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -616,6 +622,12 @@ def create_app():
 
     # Include API routes
     app.include_router(api_router, prefix=settings.API_PREFIX)
+
+    # Add Prometheus metrics endpoint
+    from shared.prometheus import create_metrics_endpoint
+
+    app.include_router(create_metrics_endpoint())
+    logger.info("Prometheus /metrics endpoint registered")
 
     return app
 

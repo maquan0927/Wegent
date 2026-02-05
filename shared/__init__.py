@@ -15,4 +15,5 @@ __all__ = [
     "telemetry",
     "telemetry_metrics",
     "telemetry_context",
+    "prometheus",
 ]
