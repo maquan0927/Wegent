@@ -19,10 +19,20 @@ from typing import Any, Optional
 import httpx
 
 from chat_shell.core.config import settings
+from shared.telemetry.decorators import add_span_event, trace_async, trace_sync
 
 logger = logging.getLogger(__name__)
 
 
+@trace_sync(
+    span_name="skill.prepare_load_skill_tool",
+    tracer_name="chat_shell.tools.skill",
+    extract_attributes=lambda skill_names, user_id, skill_configs=None: {
+        "skill.user_id": user_id,
+        "skill.skill_count": len(skill_names) if skill_names else 0,
+        "skill.skill_names": skill_names if skill_names else [],
+    },
+)
 def prepare_load_skill_tool(
     skill_names: list[str],
     user_id: int,
@@ -47,6 +57,7 @@ def prepare_load_skill_tool(
         LoadSkillTool instance or None if no skills configured
     """
     if not skill_names:
+        add_span_event("no_skills_configured")
         return None
 
     # Import LoadSkillTool
@@ -71,6 +82,10 @@ def prepare_load_skill_tool(
         skill_metadata=skill_metadata,
     )
 
+    add_span_event(
+        "load_skill_tool_created",
+        {"skill_count": len(skill_names), "skills": skill_names},
+    )
     logger.info(
         "[skill_factory] Created LoadSkillTool with skills: %s",
         skill_names,
@@ -79,6 +94,13 @@ def prepare_load_skill_tool(
     return load_skill_tool
 
 
+@trace_async(
+    span_name="skill.download_binary",
+    tracer_name="chat_shell.tools.skill",
+    extract_attributes=lambda download_url, skill_name: {
+        "skill.name": skill_name,
+    },
+)
 async def _download_skill_binary(download_url: str, skill_name: str) -> Optional[bytes]:
     """
     Download skill binary from backend API.
@@ -90,6 +112,7 @@ async def _download_skill_binary(download_url: str, skill_name: str) -> Optional
     Returns:
         Binary data or None if download failed
     """
+    add_span_event("binary_download_started")
     try:
         # Get service token from settings
         service_token = getattr(settings, "INTERNAL_SERVICE_TOKEN", None)
@@ -104,6 +127,9 @@ async def _download_skill_binary(download_url: str, skill_name: str) -> Optional
             response = await client.get(download_url, headers=headers)
             response.raise_for_status()
 
+            add_span_event(
+                "binary_download_completed", {"size_bytes": len(response.content)}
+            )
             logger.debug(
                 "[skill_factory] Downloaded skill binary for '%s': %d bytes",
                 skill_name,
@@ -112,6 +138,9 @@ async def _download_skill_binary(download_url: str, skill_name: str) -> Optional
             return response.content
 
     except httpx.HTTPStatusError as e:
+        add_span_event(
+            "binary_download_http_error", {"status_code": e.response.status_code}
+        )
         logger.error(
             "[skill_factory] HTTP error downloading skill '%s' from %s: %d %s",
             skill_name,
@@ -120,6 +149,7 @@ async def _download_skill_binary(download_url: str, skill_name: str) -> Optional
             e.response.text[:200] if e.response.text else "",
         )
     except Exception as e:
+        add_span_event("binary_download_error", {"error": str(e)})
         logger.error(
             "[skill_factory] Error downloading skill '%s' from %s: %s",
             skill_name,
@@ -130,6 +160,16 @@ async def _download_skill_binary(download_url: str, skill_name: str) -> Optional
     return None
 
 
+@trace_async(
+    span_name="skill.prepare_skill_tools",
+    tracer_name="chat_shell.tools.skill",
+    extract_attributes=lambda task_id, subtask_id, user_id, skill_configs, **kwargs: {
+        "skill.task_id": task_id,
+        "skill.subtask_id": subtask_id,
+        "skill.user_id": user_id,
+        "skill.config_count": len(skill_configs) if skill_configs else 0,
+    },
+)
 async def prepare_skill_tools(
     task_id: int,
     subtask_id: int,
@@ -219,6 +259,16 @@ async def prepare_skill_tools(
         # Check if this skill should be preloaded
         should_preload = preload_skills is not None and skill_name in preload_skills
 
+        add_span_event(
+            "skill_processing_started",
+            {
+                "skill_name": skill_name,
+                "tool_count": len(tool_declarations),
+                "has_provider": bool(provider_config),
+                "should_preload": should_preload,
+            },
+        )
+
         # Collect MCP servers from skill config - only for preloaded skills
         if mcp_servers and should_preload:
             logger.info(
@@ -252,6 +302,13 @@ async def prepare_skill_tools(
                     load_skill_tool.preload_skill_prompt(
                         skill_name, skill_config, is_user_selected=is_user_selected
                     )
+                    add_span_event(
+                        "skill_prompt_preloaded",
+                        {
+                            "skill_name": skill_name,
+                            "is_user_selected": is_user_selected,
+                        },
+                    )
                     logger.info(
                         "[skill_factory] Preloaded skill prompt for '%s' "
                         "(no tools, in preload_skills list, user_selected=%s)",
@@ -273,6 +330,10 @@ async def prepare_skill_tools(
             is_public = skill_user_id == 0
 
             if not is_public:
+                add_span_event(
+                    "skill_code_load_skipped",
+                    {"skill_name": skill_name, "reason": "non_public"},
+                )
                 logger.warning(
                     "[skill_factory] SECURITY: Skipping code loading for non-public "
                     "skill '%s' (user_id=%s). Only public skills can load code.",
@@ -286,11 +347,19 @@ async def prepare_skill_tools(
                     # Download from backend API
                     if remote_url and skill_id:
                         download_url = f"{remote_url}/skills/{skill_id}/binary"
+                        add_span_event(
+                            "skill_binary_download_started",
+                            {"skill_name": skill_name, "skill_id": skill_id},
+                        )
                         binary_data = await _download_skill_binary(
                             download_url, skill_name
                         )
 
                     if binary_data:
+                        add_span_event(
+                            "skill_binary_download_completed",
+                            {"skill_name": skill_name},
+                        )
                         # Load and register the provider
                         loaded = registry.ensure_provider_loaded(
                             skill_name=skill_name,
@@ -298,18 +367,34 @@ async def prepare_skill_tools(
                             zip_content=binary_data,
                             is_public=is_public,
                         )
-                        if not loaded:
+                        if loaded:
+                            add_span_event(
+                                "skill_provider_load_completed",
+                                {"skill_name": skill_name},
+                            )
+                        else:
+                            add_span_event(
+                                "skill_provider_load_failed", {"skill_name": skill_name}
+                            )
                             logger.warning(
                                 "[skill_factory] Failed to load provider for skill '%s'",
                                 skill_name,
                             )
                     else:
+                        add_span_event(
+                            "skill_binary_download_failed",
+                            {"skill_name": skill_name, "error": "no_binary_data"},
+                        )
                         logger.warning(
                             "[skill_factory] No binary data found for skill '%s' (id=%s)",
                             skill_name,
                             skill_id,
                         )
                 except Exception as e:
+                    add_span_event(
+                        "skill_provider_load_failed",
+                        {"skill_name": skill_name, "error": str(e)},
+                    )
                     logger.error(
                         "[skill_factory] Error loading provider for skill '%s': %s",
                         skill_name,
@@ -332,6 +417,14 @@ async def prepare_skill_tools(
         skill_tools = registry.create_tools_for_skill(skill_config, context)
 
         if skill_tools:
+            add_span_event(
+                "skill_tools_created",
+                {
+                    "skill_name": skill_name,
+                    "tool_count": len(skill_tools),
+                    "tools": [t.name for t in skill_tools],
+                },
+            )
             logger.info(
                 "[skill_factory] Created %d tools for skill '%s': %s",
                 len(skill_tools),
@@ -363,6 +456,13 @@ async def prepare_skill_tools(
                         load_skill_tool.preload_skill_prompt(
                             skill_name, skill_config, is_user_selected=is_user_selected
                         )
+                        add_span_event(
+                            "skill_prompt_preloaded",
+                            {
+                                "skill_name": skill_name,
+                                "is_user_selected": is_user_selected,
+                            },
+                        )
                         logger.info(
                             "[skill_factory] Preloaded skill prompt for '%s' "
                             "(in preload_skills list, user_selected=%s)",
@@ -385,6 +485,10 @@ async def prepare_skill_tools(
         mcp_clients.extend(skill_mcp_clients)
 
     # Log summary of all skills loaded
+    add_span_event(
+        "skill_tools_preparation_completed",
+        {"total_tools": len(tools), "mcp_clients": len(mcp_clients)},
+    )
     if tools:
         tool_names = [t.name for t in tools]
         logger.info(
@@ -396,6 +500,15 @@ async def prepare_skill_tools(
     return tools, mcp_clients
 
 
+@trace_async(
+    span_name="skill.load_mcp_tools",
+    tracer_name="chat_shell.tools.skill",
+    extract_attributes=lambda mcp_configs, task_id, task_data=None: {
+        "skill.task_id": task_id,
+        "skill.mcp_server_count": len(mcp_configs) if mcp_configs else 0,
+        "skill.mcp_servers": list(mcp_configs.keys()) if mcp_configs else [],
+    },
+)
 async def _load_skill_mcp_tools(
     mcp_configs: dict[str, dict[str, Any]],
     task_id: int,
@@ -434,12 +547,16 @@ async def _load_skill_mcp_tools(
         # Create MCPClient with all skill MCP servers
         client = MCPClient(mcp_configs, task_data=task_data)
 
+        add_span_event("skill_mcp_connect_started")
         try:
             await asyncio.wait_for(client.connect(), timeout=30.0)
             if client.is_connected:
                 tools = client.get_tools()
                 mcp_tools.extend(tools)
                 mcp_clients.append(client)
+                add_span_event(
+                    "skill_mcp_connect_completed", {"tools_count": len(tools)}
+                )
                 logger.info(
                     "[skill_factory] Loaded %d MCP tools from skill servers for task %d",
                     len(tools),
@@ -447,18 +564,23 @@ async def _load_skill_mcp_tools(
                 )
             else:
                 # Connection succeeded but client not ready, clean up
+                add_span_event(
+                    "skill_mcp_connect_failed", {"error": "client_not_ready"}
+                )
                 logger.warning(
                     "[skill_factory] Failed to connect to skill MCP servers for task %d",
                     task_id,
                 )
                 await _safe_disconnect_client(client, task_id)
         except asyncio.TimeoutError:
+            add_span_event("skill_mcp_connect_timeout")
             logger.error(
                 "[skill_factory] Timeout connecting to skill MCP servers for task %d",
                 task_id,
             )
             await _safe_disconnect_client(client, task_id)
         except Exception as e:
+            add_span_event("skill_mcp_connect_failed", {"error": str(e)})
             logger.error(
                 "[skill_factory] Failed to connect to skill MCP servers for task %d: %s",
                 task_id,
@@ -466,7 +588,8 @@ async def _load_skill_mcp_tools(
             )
             await _safe_disconnect_client(client, task_id)
 
-    except Exception:
+    except Exception as e:
+        add_span_event("skill_mcp_load_error", {"error": str(e)})
         logger.exception(
             "[skill_factory] Unexpected error loading skill MCP tools for task %d",
             task_id,

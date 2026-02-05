@@ -21,6 +21,8 @@ from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
+from shared.telemetry.decorators import add_span_event
+
 logger = logging.getLogger(__name__)
 
 # Default number of turns to retain a loaded skill
@@ -129,11 +131,18 @@ class LoadSkillTool(BaseTool):
         Returns:
             True if skill was loaded successfully, False otherwise
         """
+        add_span_event(
+            "skill_load_started", {"skill_name": skill_name, "source": source}
+        )
+
         # Get skill metadata
         skill_info = self.skill_metadata.get(skill_name, {})
         prompt = skill_info.get("prompt", "")
 
         if not prompt:
+            add_span_event(
+                "skill_load_no_prompt", {"skill_name": skill_name, "source": source}
+            )
             logger.warning(
                 "[LoadSkillTool] Skill '%s' has no prompt content (source=%s)",
                 skill_name,
@@ -158,6 +167,15 @@ class LoadSkillTool(BaseTool):
         if display_name:
             self._skill_display_names[skill_name] = display_name
 
+        add_span_event(
+            "skill_load_completed",
+            {
+                "skill_name": skill_name,
+                "source": source,
+                "remaining_turns": turns,
+                "has_display_name": bool(display_name),
+            },
+        )
         logger.info(
             "[LoadSkillTool] Loaded skill '%s' (source=%s, remaining_turns=%d)",
             skill_name,
@@ -172,7 +190,13 @@ class LoadSkillTool(BaseTool):
         run_manager: CallbackManagerForToolRun | None = None,
     ) -> str:
         """Load skill and return prompt content."""
+        add_span_event("skill_tool_invoked", {"skill_name": skill_name})
+
         if skill_name not in self.skill_names:
+            add_span_event(
+                "skill_not_available",
+                {"skill_name": skill_name, "available_count": len(self.skill_names)},
+            )
             return (
                 f"Error: Skill '{skill_name}' is not available. "
                 f"Available skills: {', '.join(self.skill_names)}"
@@ -182,6 +206,7 @@ class LoadSkillTool(BaseTool):
         if skill_name in self._expanded_skills:
             # Reset the remaining turns counter since skill is being used again
             self._skill_remaining_turns[skill_name] = self.skill_retention_turns
+            add_span_event("skill_already_active", {"skill_name": skill_name})
             return (
                 f"Skill '{skill_name}' is already active in this conversation turn. "
                 f"The skill instructions have been added to the system prompt."
@@ -189,8 +214,10 @@ class LoadSkillTool(BaseTool):
 
         # Use shared internal method to load the skill
         if not self._load_skill_internal(skill_name, source="load_skill"):
+            add_span_event("skill_load_failed", {"skill_name": skill_name})
             return f"Error: Skill '{skill_name}' has no prompt content."
 
+        add_span_event("skill_load_success", {"skill_name": skill_name})
         # Return a confirmation message (the actual prompt will be injected into system prompt)
         return f"Skill '{skill_name}' has been loaded. The instructions have been added to the system prompt. Please follow them strictly."
 
@@ -612,13 +639,20 @@ The following skills provide specialized guidance for specific tasks. When your 
             history: List of message dictionaries with 'role' and 'content' keys.
                     May also contain 'loaded_skills' for assistant messages.
         """
+        add_span_event(
+            "skill_restore_started",
+            {"history_length": len(history) if history else 0},
+        )
+
         if self._state_restored:
+            add_span_event("skill_restore_skipped", {"reason": "already_restored"})
             logger.debug(
                 "[LoadSkillTool] State already restored, skipping restore_from_history"
             )
             return
 
         if not history:
+            add_span_event("skill_restore_skipped", {"reason": "no_history"})
             logger.debug("[LoadSkillTool] No history to restore from")
             self._state_restored = True
             return
@@ -700,6 +734,13 @@ The following skills provide specialized guidance for specific tasks. When your 
                 )
 
         self._state_restored = True
+        add_span_event(
+            "skill_restore_completed",
+            {
+                "restored_count": restored_count,
+                "retention_turns": self.skill_retention_turns,
+            },
+        )
         logger.info(
             "[LoadSkillTool] Restored %d skills from history (retention=%d turns)",
             restored_count,

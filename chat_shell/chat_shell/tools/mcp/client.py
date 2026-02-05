@@ -98,6 +98,7 @@ def wrap_tool_with_protection(
 
     def protected_run(*args, **kwargs):
         """Synchronous tool execution with protection."""
+        add_span_event("mcp_tool_run_started", {"tool_name": tool.name})
         try:
             if original_run:
                 if run_accepts_config and "config" not in kwargs:
@@ -106,21 +107,37 @@ def wrap_tool_with_protection(
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(original_run, *args, **kwargs)
                     try:
-                        return future.result(timeout=timeout)
+                        result = future.result(timeout=timeout)
+                        add_span_event(
+                            "mcp_tool_run_completed", {"tool_name": tool.name}
+                        )
+                        return result
                     except concurrent.futures.TimeoutError:
                         error_msg = f"MCP tool '{tool.name}' timed out after {timeout}s"
+                        add_span_event(
+                            "mcp_tool_run_timeout",
+                            {"tool_name": tool.name, "timeout": timeout},
+                        )
                         logger.error("[MCP] %s", error_msg)
                         return _format_error(error_msg)
 
+            add_span_event(
+                "mcp_tool_run_failed",
+                {"tool_name": tool.name, "error": "no_sync_implementation"},
+            )
             return _format_error(
                 f"Error: Tool {tool.name} has no synchronous implementation"
             )
         except Exception as e:
+            add_span_event(
+                "mcp_tool_run_failed", {"tool_name": tool.name, "error": str(e)}
+            )
             logger.exception("[MCP] MCP tool '%s' failed: %s", tool.name, e)
             return _format_error(f"MCP tool '{tool.name}' failed: {e!s}")
 
     async def protected_arun(*args, **kwargs):
         """Asynchronous tool execution with timeout and exception protection."""
+        add_span_event("mcp_tool_arun_started", {"tool_name": tool.name})
         try:
             if original_arun:
                 if arun_accepts_config and "config" not in kwargs:
@@ -129,13 +146,24 @@ def wrap_tool_with_protection(
                 result = await asyncio.wait_for(
                     original_arun(*args, **kwargs), timeout=timeout
                 )
+                add_span_event("mcp_tool_arun_completed", {"tool_name": tool.name})
                 return result
+            add_span_event(
+                "mcp_tool_arun_failed",
+                {"tool_name": tool.name, "error": "no_async_implementation"},
+            )
             return _format_error(f"Error: Tool {tool.name} has no async implementation")
         except asyncio.TimeoutError:
             error_msg = f"MCP tool '{tool.name}' timed out after {timeout}s"
+            add_span_event(
+                "mcp_tool_arun_timeout", {"tool_name": tool.name, "timeout": timeout}
+            )
             logger.error("[MCP] %s", error_msg)
             return _format_error(error_msg)
         except Exception as e:
+            add_span_event(
+                "mcp_tool_arun_failed", {"tool_name": tool.name, "error": str(e)}
+            )
             logger.exception("[MCP] MCP tool '%s' failed: %s", tool.name, e)
             return _format_error(f"MCP tool '{tool.name}' failed: {e!s}")
 

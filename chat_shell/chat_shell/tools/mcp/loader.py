@@ -16,10 +16,20 @@ from typing import Any
 import httpx
 
 from chat_shell.core.config import settings
+from shared.telemetry.decorators import add_span_event, trace_async
 
 logger = logging.getLogger(__name__)
 
 
+@trace_async(
+    span_name="mcp.load_tools",
+    tracer_name="chat_shell.tools.mcp",
+    extract_attributes=lambda task_id, bot_name="", bot_namespace="default", task_data=None: {
+        "mcp.task_id": task_id,
+        "mcp.bot_name": bot_name,
+        "mcp.bot_namespace": bot_namespace,
+    },
+)
 async def load_mcp_tools(
     task_id: int,
     bot_name: str = "",
@@ -60,19 +70,29 @@ async def load_mcp_tools(
             try:
                 config_data = json.loads(mcp_servers_config)
                 backend_servers = config_data.get("mcpServers", config_data)
+                add_span_event(
+                    "backend_servers_loaded",
+                    {
+                        "count": len(backend_servers),
+                        "servers": list(backend_servers.keys()),
+                    },
+                )
                 logger.info(
                     "[MCP] Loaded %d backend MCP servers from CHAT_MCP_SERVERS: %s",
                     len(backend_servers),
                     list(backend_servers.keys()),
                 )
             except json.JSONDecodeError as e:
+                add_span_event("backend_servers_parse_failed", {"error": str(e)})
                 logger.warning("[MCP] Failed to parse CHAT_MCP_SERVERS: %s", str(e))
         else:
+            add_span_event("no_backend_servers_configured")
             logger.debug("[MCP] No CHAT_MCP_SERVERS configured")
 
         # Step 2: Load bot's MCP configuration via backend API
         bot_servers = {}
         if bot_name and bot_namespace:
+            add_span_event("bot_servers_fetch_started")
             logger.info(
                 "[MCP] Fetching bot MCP servers from backend API for %s/%s",
                 bot_namespace,
@@ -83,24 +103,34 @@ async def load_mcp_tools(
                     _get_bot_mcp_servers(bot_name, bot_namespace), timeout=5.0
                 )
                 if bot_servers:
+                    add_span_event(
+                        "bot_servers_fetch_completed",
+                        {
+                            "count": len(bot_servers),
+                            "servers": list(bot_servers.keys()),
+                        },
+                    )
                     logger.info(
                         "[MCP] Retrieved %d bot MCP servers from API: %s",
                         len(bot_servers),
                         list(bot_servers.keys()),
                     )
                 else:
+                    add_span_event("bot_servers_fetch_empty")
                     logger.info(
                         "[MCP] No bot MCP servers configured for %s/%s",
                         bot_namespace,
                         bot_name,
                     )
             except asyncio.TimeoutError:
+                add_span_event("bot_servers_fetch_timeout")
                 logger.warning(
                     "[MCP] Timeout querying bot MCP servers for %s/%s",
                     bot_namespace,
                     bot_name,
                 )
             except Exception as e:
+                add_span_event("bot_servers_fetch_failed", {"error": str(e)})
                 logger.warning(
                     "[MCP] Failed to load bot MCP servers for %s/%s: %s",
                     bot_namespace,
@@ -108,6 +138,7 @@ async def load_mcp_tools(
                     str(e),
                 )
         else:
+            add_span_event("bot_servers_fetch_skipped", {"reason": "no_bot_name"})
             logger.debug("[MCP] No bot name provided, skipping bot MCP lookup")
 
         # Step 3: Merge configurations
@@ -115,9 +146,17 @@ async def load_mcp_tools(
         merged_servers = {**backend_servers, **bot_servers}
 
         if not merged_servers:
+            add_span_event("no_servers_configured")
             logger.info("[MCP] No MCP servers configured for task %d", task_id)
             return None
 
+        add_span_event(
+            "servers_merged",
+            {
+                "total_count": len(merged_servers),
+                "servers": list(merged_servers.keys()),
+            },
+        )
         logger.info(
             "[MCP] Merged MCP configuration for task %d: %d servers (%s)",
             task_id,
@@ -127,19 +166,27 @@ async def load_mcp_tools(
 
         # Step 4: Create MCP client with merged configuration
         client = MCPClient(merged_servers, task_data=task_data)
+        add_span_event("client_connect_started")
         try:
             await asyncio.wait_for(client.connect(), timeout=30.0)
+            tools_count = len(client.get_tools())
+            add_span_event(
+                "client_connect_completed",
+                {"tools_count": tools_count, "servers_count": len(merged_servers)},
+            )
             logger.info(
                 "[MCP] Loaded %d tools from %d MCP servers for task %d",
-                len(client.get_tools()),
+                tools_count,
                 len(merged_servers),
                 task_id,
             )
             return client
         except asyncio.TimeoutError:
+            add_span_event("client_connect_timeout")
             logger.error("[MCP] Timeout connecting to MCP servers for task %d", task_id)
             return None
         except Exception as e:
+            add_span_event("client_connect_failed", {"error": str(e)})
             logger.error(
                 "[MCP] Failed to connect to MCP servers for task %d: %s",
                 task_id,
@@ -147,13 +194,22 @@ async def load_mcp_tools(
             )
             return None
 
-    except Exception:
+    except Exception as e:
+        add_span_event("load_mcp_tools_error", {"error": str(e)})
         logger.exception(
             "[MCP] Unexpected error loading MCP tools for task %d", task_id
         )
         return None
 
 
+@trace_async(
+    span_name="mcp.get_bot_servers",
+    tracer_name="chat_shell.tools.mcp",
+    extract_attributes=lambda bot_name, bot_namespace: {
+        "mcp.bot_name": bot_name,
+        "mcp.bot_namespace": bot_namespace,
+    },
+)
 async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, Any]:
     """Query bot's MCP server configuration via backend API.
 
@@ -179,6 +235,7 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
     url = f"{base_url}/bots/{bot_name}/mcp"
     params = {"namespace": bot_namespace}
 
+    add_span_event("api_request_started", {"url": url})
     logger.debug(
         "[MCP] Calling backend API: GET %s?namespace=%s",
         url,
@@ -198,6 +255,13 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
             if response.status_code == 200:
                 data = response.json()
                 mcp_servers = data.get("mcp_servers", {})
+                add_span_event(
+                    "api_request_completed",
+                    {
+                        "status_code": response.status_code,
+                        "servers_count": len(mcp_servers),
+                    },
+                )
                 logger.info(
                     "[MCP] Backend API returned %d MCP servers for bot %s/%s",
                     len(mcp_servers),
@@ -206,6 +270,9 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
                 )
                 return mcp_servers
             else:
+                add_span_event(
+                    "api_request_failed", {"status_code": response.status_code}
+                )
                 logger.warning(
                     "[MCP] Backend API returned status %d for bot %s/%s: %s",
                     response.status_code,
@@ -216,6 +283,7 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
                 return {}
 
     except httpx.TimeoutException:
+        add_span_event("api_request_timeout")
         logger.warning(
             "[MCP] Timeout calling backend API for bot %s/%s",
             bot_namespace,
@@ -223,6 +291,7 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
         )
         return {}
     except httpx.RequestError as e:
+        add_span_event("api_request_error", {"error": str(e)})
         logger.warning(
             "[MCP] Request error calling backend API for bot %s/%s: %s",
             bot_namespace,
@@ -230,7 +299,8 @@ async def _get_bot_mcp_servers(bot_name: str, bot_namespace: str) -> dict[str, A
             str(e),
         )
         return {}
-    except Exception:
+    except Exception as e:
+        add_span_event("api_request_error", {"error": str(e)})
         logger.exception(
             "[MCP] Failed to query bot MCP servers for %s/%s via API",
             bot_namespace,
