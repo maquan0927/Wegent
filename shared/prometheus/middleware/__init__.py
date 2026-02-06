@@ -4,7 +4,10 @@
 
 """Prometheus middleware module."""
 
-from shared.prometheus.middleware.fastapi import PrometheusMiddleware
+from shared.prometheus.middleware.fastapi import (
+    PrometheusMiddleware,
+    ServiceType,
+)
 from shared.prometheus.middleware.socketio import (
     prometheus_socketio_event,
     record_socketio_connection,
@@ -12,6 +15,7 @@ from shared.prometheus.middleware.socketio import (
 
 __all__ = [
     "PrometheusMiddleware",
+    "ServiceType",
     "prometheus_socketio_event",
     "record_socketio_connection",
 ]

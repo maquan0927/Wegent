@@ -600,10 +600,11 @@ def create_app():
     if settings.PROMETHEUS_ENABLED:
         from shared.prometheus.middleware.fastapi import (
             PrometheusMiddleware,
+            ServiceType,
             setup_prometheus_endpoint,
         )
 
-        app.add_middleware(PrometheusMiddleware)
+        app.add_middleware(PrometheusMiddleware, service_type=ServiceType.BACKEND)
         setup_prometheus_endpoint(app, settings.PROMETHEUS_METRICS_PATH)
         logger.info(f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}")
     else:

@@ -2,12 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP/API Prometheus metrics.
+"""Chat Shell HTTP/API Prometheus metrics.
 
-Provides metrics for HTTP request tracking:
-- http_requests_total: Counter for total requests
-- http_request_duration_seconds: Histogram for request latency
-- http_requests_in_progress: Gauge for concurrent requests
+Provides metrics for Chat Shell HTTP request tracking with extended buckets
+optimized for LLM interactions that can take much longer than standard REST APIs:
+- chat_shell_http_requests_total: Counter for total requests
+- chat_shell_http_request_duration_seconds: Histogram for request latency
+- chat_shell_http_requests_in_progress: Gauge for concurrent requests
 """
 
 from typing import Optional
@@ -16,37 +17,38 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from shared.prometheus.registry import get_registry
 
-# Histogram buckets starting from 0.1 seconds
-# Covers: 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10, 30, 60, 120, 300 seconds
-HTTP_DURATION_BUCKETS = (
-    0.1,
-    0.25,
-    0.5,
-    0.75,
+# Histogram buckets optimized for Chat Shell LLM interactions
+# Extended to support long-running streaming responses up to 30 minutes
+# Covers: 1, 5, 10, 30, 60, 120, 300, 600, 900, 1800 seconds
+CHAT_SHELL_HTTP_DURATION_BUCKETS = (
     1.0,
-    2.5,
     5.0,
-    7.5,
     10.0,
     30.0,
     60.0,
     120.0,
     300.0,
+    600.0,
+    900.0,
+    1800.0,
     float("inf"),
 )
 
 
-class HTTPMetrics:
-    """HTTP metrics collection class.
+class ChatShellHTTPMetrics:
+    """Chat Shell HTTP metrics collection class.
 
-    Provides metrics for monitoring HTTP API performance:
+    Provides metrics for monitoring Chat Shell HTTP API performance:
     - Request counts by endpoint, method, and status
-    - Request latency distribution
+    - Request latency distribution with extended buckets for LLM interactions
     - Concurrent request tracking
+
+    The buckets are designed for long-running LLM streaming responses that
+    can take anywhere from a few seconds to 30 minutes.
     """
 
     def __init__(self, registry=None):
-        """Initialize HTTP metrics.
+        """Initialize Chat Shell HTTP metrics.
 
         Args:
             registry: Optional Prometheus registry. Uses global registry if not provided.
@@ -61,8 +63,8 @@ class HTTPMetrics:
         """Get or create the requests total counter."""
         if self._requests_total is None:
             self._requests_total = Counter(
-                "http_requests_total",
-                "Total number of HTTP requests",
+                "chat_shell_http_requests_total",
+                "Total number of Chat Shell HTTP requests",
                 labelnames=["method", "endpoint", "status_code"],
                 registry=self._registry,
             )
@@ -73,10 +75,10 @@ class HTTPMetrics:
         """Get or create the request duration histogram."""
         if self._request_duration is None:
             self._request_duration = Histogram(
-                "http_request_duration_seconds",
-                "HTTP request duration in seconds",
+                "chat_shell_http_request_duration_seconds",
+                "Chat Shell HTTP request duration in seconds",
                 labelnames=["method", "endpoint", "status_code"],
-                buckets=HTTP_DURATION_BUCKETS,
+                buckets=CHAT_SHELL_HTTP_DURATION_BUCKETS,
                 registry=self._registry,
             )
         return self._request_duration
@@ -86,8 +88,8 @@ class HTTPMetrics:
         """Get or create the requests in progress gauge."""
         if self._requests_in_progress is None:
             self._requests_in_progress = Gauge(
-                "http_requests_in_progress",
-                "Number of HTTP requests currently being processed",
+                "chat_shell_http_requests_in_progress",
+                "Number of Chat Shell HTTP requests currently being processed",
                 labelnames=["method", "endpoint"],
                 registry=self._registry,
             )
@@ -136,22 +138,22 @@ class HTTPMetrics:
 
 
 # Global instance
-_http_metrics: Optional[HTTPMetrics] = None
+_chat_shell_http_metrics: Optional[ChatShellHTTPMetrics] = None
 
 
-def get_http_metrics() -> HTTPMetrics:
-    """Get the global HTTP metrics instance.
+def get_chat_shell_http_metrics() -> ChatShellHTTPMetrics:
+    """Get the global Chat Shell HTTP metrics instance.
 
     Returns:
-        HTTPMetrics singleton instance.
+        ChatShellHTTPMetrics singleton instance.
     """
-    global _http_metrics
-    if _http_metrics is None:
-        _http_metrics = HTTPMetrics()
-    return _http_metrics
+    global _chat_shell_http_metrics
+    if _chat_shell_http_metrics is None:
+        _chat_shell_http_metrics = ChatShellHTTPMetrics()
+    return _chat_shell_http_metrics
 
 
-def reset_http_metrics() -> None:
-    """Reset the global HTTP metrics (for testing)."""
-    global _http_metrics
-    _http_metrics = None
+def reset_chat_shell_http_metrics() -> None:
+    """Reset the global Chat Shell HTTP metrics (for testing)."""
+    global _chat_shell_http_metrics
+    _chat_shell_http_metrics = None
