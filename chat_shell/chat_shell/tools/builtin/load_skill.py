@@ -308,20 +308,30 @@ class LoadSkillTool(BaseTool):
                 for this message. User-selected skills will be highlighted in the
                 system prompt to encourage the model to prioritize them.
         """
-        # Temporarily add to skill_metadata if not present (for _load_skill_internal)
-        if skill_name not in self.skill_metadata:
-            self.skill_metadata[skill_name] = skill_config
+        start_time = time.time()
+        status = "success"
 
-        # Use shared internal method to load the skill
-        self._load_skill_internal(skill_name, source="preload")
+        try:
+            # Temporarily add to skill_metadata if not present (for _load_skill_internal)
+            if skill_name not in self.skill_metadata:
+                self.skill_metadata[skill_name] = skill_config
 
-        # Track user-selected skills
-        if is_user_selected:
-            self._user_selected_skills.add(skill_name)
-            logger.info(
-                "[LoadSkillTool] Marked skill '%s' as user-selected",
-                skill_name,
-            )
+            # Use shared internal method to load the skill
+            if not self._load_skill_internal(skill_name, source="preload"):
+                status = "error"
+                return
+
+            # Track user-selected skills
+            if is_user_selected:
+                self._user_selected_skills.add(skill_name)
+                logger.info(
+                    "[LoadSkillTool] Marked skill '%s' as user-selected",
+                    skill_name,
+                )
+        finally:
+            duration = time.time() - start_time
+            # Record metrics for preloaded skills
+            self._record_skill_metrics(skill_name, status, duration)
 
     def get_prompt_modification(self) -> str:
         """Get prompt modification content for system prompt injection.
