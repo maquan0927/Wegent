@@ -400,12 +400,10 @@ def create_app(
 
         app.add_middleware(PrometheusMiddleware)
         setup_prometheus_endpoint(app, settings.PROMETHEUS_METRICS_PATH)
-        logger.info(
-            f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}"
-        )
+        logger.info(f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}")
     else:
-        logger.debug(
-            "Prometheus metrics disabled. Set PROMETHEUS_ENABLED=true to enable."
+        logger.info(
+            "Prometheus metrics disabled. Set CHAT_SHELL_PROMETHEUS_ENABLED=true to enable."
         )
 
     # Root endpoint with basic info
