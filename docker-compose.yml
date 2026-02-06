@@ -109,6 +109,9 @@ services:
       # Task Dispatch Configuration
       # Mode: 'pull' (default, executor_manager polls) or 'push' (backend pushes)
       TASK_DISPATCH_MODE: ${TASK_DISPATCH_MODE:-pull}
+      # Prometheus Configuration (uncomment to enable)
+      # PROMETHEUS_ENABLED: "true"
+      # PROMETHEUS_METRICS_PATH: "/metrics"
       # OpenTelemetry Configuration (uncomment to enable)
       # OTEL_ENABLED: "true"
       # OTEL_SERVICE_NAME: "wegent-backend"
@@ -171,6 +174,9 @@ services:
       - CHAT_SHELL_REMOTE_STORAGE_URL=${CHAT_SHELL_REMOTE_STORAGE_URL:-http://backend:8000/api/internal}
       - EXECUTOR_MANAGER_URL=${EXECUTOR_MANAGER_URL:-http://executor_manager:8001}
       # - CHAT_SHELL_REMOTE_STORAGE_TOKEN=${INTERNAL_SERVICE_TOKEN:-chat-shell-token}
+      # Prometheus Configuration (uncomment to enable)
+      # - CHAT_SHELL_PROMETHEUS_ENABLED=true
+      # - CHAT_SHELL_PROMETHEUS_METRICS_PATH=/metrics
       # OpenTelemetry Configuration (uncomment to enable)
       # - OTEL_ENABLED=true
       # - OTEL_SERVICE_NAME=wegent-chat-shell
