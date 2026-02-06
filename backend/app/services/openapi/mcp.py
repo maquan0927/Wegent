@@ -37,8 +37,18 @@ def _record_mcp_connection_metrics(server: str, status: str) -> None:
 
             metrics = get_mcp_metrics()
             metrics.observe_connection(server=server, status=status)
+            logger.info(
+                "[OPENAPI_MCP] Recorded connection metrics: server=%s, status=%s",
+                server,
+                status,
+            )
         except Exception as e:
-            logger.debug("[OPENAPI_MCP] Failed to record connection metrics: %s", e)
+            logger.warning("[OPENAPI_MCP] Failed to record connection metrics: %s", e)
+    else:
+        logger.debug(
+            "[OPENAPI_MCP] Prometheus disabled, skipping connection metrics for server %s",
+            server,
+        )
 
 
 def _record_mcp_tool_discovery_metrics(
@@ -59,8 +69,21 @@ def _record_mcp_tool_discovery_metrics(
             metrics.observe_tool_discovery(
                 server=server, status=status, duration_seconds=duration
             )
+            logger.info(
+                "[OPENAPI_MCP] Recorded tool discovery metrics: server=%s, status=%s, duration=%.3fs",
+                server,
+                status,
+                duration,
+            )
         except Exception as e:
-            logger.debug("[OPENAPI_MCP] Failed to record tool discovery metrics: %s", e)
+            logger.warning(
+                "[OPENAPI_MCP] Failed to record tool discovery metrics: %s", e
+            )
+    else:
+        logger.debug(
+            "[OPENAPI_MCP] Prometheus disabled, skipping tool discovery metrics for server %s",
+            server,
+        )
 
 
 async def load_server_mcp_tools(task_id: int) -> Any:
