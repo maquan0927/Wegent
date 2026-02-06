@@ -723,13 +723,25 @@ The following skills provide specialized guidance for specific tasks. When your 
             remaining_turns = self.skill_retention_turns - turns_ago
 
             if remaining_turns > 0 and skill_name in self.skill_names:
-                # Use shared internal method to restore the skill
-                if self._load_skill_internal(
-                    skill_name,
-                    remaining_turns=remaining_turns,
-                    source=f"restore (loaded {turns_ago} turns ago)",
-                ):
-                    restored_count += 1
+                start_time = time.time()
+                status = "success"
+
+                try:
+                    # Use shared internal method to restore the skill
+                    if self._load_skill_internal(
+                        skill_name,
+                        remaining_turns=remaining_turns,
+                        source=f"restore (loaded {turns_ago} turns ago)",
+                    ):
+                        restored_count += 1
+                    else:
+                        status = "error"
+                finally:
+                    # Record metrics for restored skills
+                    duration = time.time() - start_time
+                    self._record_skill_metrics(
+                        skill_name, f"restored_{status}", duration
+                    )
             elif remaining_turns <= 0:
                 logger.debug(
                     "[LoadSkillTool] Skill '%s' expired (loaded %d turns ago, "
