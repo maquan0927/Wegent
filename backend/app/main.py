@@ -23,9 +23,6 @@ from contextlib import asynccontextmanager
 
 import redis
 import socketio
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-
 from app.api.api import api_router
 from app.core.config import settings
 from app.core.exceptions import (
@@ -42,6 +39,8 @@ from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models import *  # noqa: F401,F403
 from app.services.jobs import start_background_jobs, stop_background_jobs
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 # Redis lock key for startup operations (migrations + YAML init)
 # Only used to prevent concurrent initialization, not to skip initialization
@@ -596,6 +595,22 @@ def create_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Setup Prometheus middleware if enabled
+    if settings.PROMETHEUS_ENABLED:
+        from shared.prometheus.middleware.fastapi import (
+            PrometheusMiddleware,
+            ServiceType,
+            setup_prometheus_endpoint,
+        )
+
+        app.add_middleware(PrometheusMiddleware, service_type=ServiceType.BACKEND)
+        setup_prometheus_endpoint(app, settings.PROMETHEUS_METRICS_PATH)
+        logger.info(f"Prometheus metrics enabled at {settings.PROMETHEUS_METRICS_PATH}")
+    else:
+        logger.info(
+            "Prometheus metrics disabled. Set PROMETHEUS_ENABLED=true to enable."
+        )
 
     # Register exception handlers
     app.add_exception_handler(CustomHTTPException, http_exception_handler)
