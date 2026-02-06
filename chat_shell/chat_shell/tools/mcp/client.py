@@ -33,7 +33,6 @@ import logging
 import time
 from typing import Any
 
-from chat_shell.core.config import settings
 from langchain_core.tools.base import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import (
@@ -42,6 +41,7 @@ from langchain_mcp_adapters.sessions import (
     StreamableHttpConnection,
 )
 
+from chat_shell.core.config import settings
 from shared.telemetry.decorators import add_span_event, trace_async
 from shared.utils.mcp_utils import replace_mcp_server_variables
 from shared.utils.sensitive_data_masker import mask_sensitive_data
@@ -122,8 +122,19 @@ def wrap_tool_with_protection(
                     status=status,
                     duration_seconds=duration,
                 )
+                logger.info(
+                    "[MCP] Recorded metrics: server=%s, tool=%s, status=%s, duration=%.3fs",
+                    server_name,
+                    tool_name,
+                    status,
+                    duration,
+                )
             except Exception as e:
-                logger.debug("[MCP] Failed to record metrics: %s", e)
+                logger.warning("[MCP] Failed to record metrics: %s", e)
+        else:
+            logger.debug(
+                "[MCP] Prometheus disabled, skipping metrics for tool %s", tool_name
+            )
 
     def protected_run(*args, **kwargs):
         """Synchronous tool execution with protection."""
@@ -456,8 +467,18 @@ class MCPClient:
 
                 metrics = get_mcp_metrics()
                 metrics.observe_connection(server=server, status=status)
+                logger.info(
+                    "[MCP] Recorded connection metrics: server=%s, status=%s",
+                    server,
+                    status,
+                )
             except Exception as e:
-                logger.debug("[MCP] Failed to record connection metrics: %s", e)
+                logger.warning("[MCP] Failed to record connection metrics: %s", e)
+        else:
+            logger.debug(
+                "[MCP] Prometheus disabled, skipping connection metrics for server %s",
+                server,
+            )
 
     def _record_disconnection_metrics(self, server: str) -> None:
         """Record Prometheus metrics for MCP disconnection.
@@ -471,8 +492,17 @@ class MCPClient:
 
                 metrics = get_mcp_metrics()
                 metrics.observe_disconnection(server=server)
+                logger.info(
+                    "[MCP] Recorded disconnection metrics: server=%s",
+                    server,
+                )
             except Exception as e:
-                logger.debug("[MCP] Failed to record disconnection metrics: %s", e)
+                logger.warning("[MCP] Failed to record disconnection metrics: %s", e)
+        else:
+            logger.debug(
+                "[MCP] Prometheus disabled, skipping disconnection metrics for server %s",
+                server,
+            )
 
     def _record_tool_discovery_metrics(
         self, server: str, status: str, duration: float
@@ -492,8 +522,19 @@ class MCPClient:
                 metrics.observe_tool_discovery(
                     server=server, status=status, duration_seconds=duration
                 )
+                logger.info(
+                    "[MCP] Recorded tool discovery metrics: server=%s, status=%s, duration=%.3fs",
+                    server,
+                    status,
+                    duration,
+                )
             except Exception as e:
-                logger.debug("[MCP] Failed to record tool discovery metrics: %s", e)
+                logger.warning("[MCP] Failed to record tool discovery metrics: %s", e)
+        else:
+            logger.debug(
+                "[MCP] Prometheus disabled, skipping tool discovery metrics for server %s",
+                server,
+            )
 
     def get_tools(self, server_names: list[str] | None = None) -> list[BaseTool]:
         """Get LangChain-compatible tools from connected servers.
