@@ -5,17 +5,20 @@
 """FastAPI Prometheus middleware.
 
 Provides automatic metrics collection for FastAPI applications.
+Supports service-specific metrics with different bucket configurations:
+- Backend: Optimized for standard REST API response times
+- Chat Shell: Extended buckets for long-running LLM interactions
 """
 
 import time
-from typing import Callable, Set
+from enum import Enum
+from typing import Callable, Optional, Set, Union
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from shared.prometheus.config import get_prometheus_config
-from shared.prometheus.metrics.http import get_http_metrics
 from shared.prometheus.utils import get_route_template, normalize_route
 
 # Default paths to exclude from metrics
@@ -30,6 +33,36 @@ DEFAULT_EXCLUDED_PATHS: Set[str] = {
 }
 
 
+class ServiceType(str, Enum):
+    """Service type for selecting appropriate metrics configuration."""
+
+    BACKEND = "backend"
+    CHAT_SHELL = "chat_shell"
+
+
+def _get_metrics_for_service(service_type: ServiceType):
+    """Get the appropriate metrics instance for the service type.
+
+    Args:
+        service_type: The service type (backend or chat_shell)
+
+    Returns:
+        The metrics instance for the specified service type
+    """
+    if service_type == ServiceType.BACKEND:
+        from shared.prometheus.metrics.backend_http import get_backend_http_metrics
+
+        return get_backend_http_metrics()
+    elif service_type == ServiceType.CHAT_SHELL:
+        from shared.prometheus.metrics.chat_shell_http import (
+            get_chat_shell_http_metrics,
+        )
+
+        return get_chat_shell_http_metrics()
+    else:
+        raise ValueError(f"Unknown service type: {service_type}")
+
+
 class PrometheusMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware for Prometheus metrics collection.
 
@@ -38,26 +71,45 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
     - Request latency distribution
     - Concurrent request tracking
 
-    Usage:
-        from shared.prometheus.middleware import PrometheusMiddleware
+    Supports service-specific metrics:
+    - Backend: backend_http_* metrics with REST API optimized buckets
+    - Chat Shell: chat_shell_http_* metrics with LLM optimized buckets
 
-        app.add_middleware(PrometheusMiddleware)
+    Usage:
+        from shared.prometheus.middleware import PrometheusMiddleware, ServiceType
+
+        # For Backend
+        app.add_middleware(PrometheusMiddleware, service_type=ServiceType.BACKEND)
+
+        # For Chat Shell
+        app.add_middleware(PrometheusMiddleware, service_type=ServiceType.CHAT_SHELL)
     """
 
     def __init__(
         self,
         app,
-        excluded_paths: Set[str] = None,
+        service_type: Union[ServiceType, str] = ServiceType.BACKEND,
+        excluded_paths: Optional[Set[str]] = None,
     ):
         """Initialize the middleware.
 
         Args:
             app: The ASGI application
+            service_type: The service type for metrics selection.
+                         Use ServiceType.BACKEND for backend service or
+                         ServiceType.CHAT_SHELL for chat shell service.
+                         Defaults to ServiceType.BACKEND.
             excluded_paths: Set of paths to exclude from metrics collection.
                            Defaults to health check endpoints.
         """
         super().__init__(app)
-        self._metrics = get_http_metrics()
+
+        # Convert string to ServiceType if needed
+        if isinstance(service_type, str):
+            service_type = ServiceType(service_type)
+
+        self._service_type = service_type
+        self._metrics = _get_metrics_for_service(service_type)
         self._config = get_prometheus_config()
 
         # Merge default excluded paths with custom ones
