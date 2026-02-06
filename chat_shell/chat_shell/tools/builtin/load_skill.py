@@ -308,20 +308,30 @@ class LoadSkillTool(BaseTool):
                 for this message. User-selected skills will be highlighted in the
                 system prompt to encourage the model to prioritize them.
         """
-        # Temporarily add to skill_metadata if not present (for _load_skill_internal)
-        if skill_name not in self.skill_metadata:
-            self.skill_metadata[skill_name] = skill_config
+        start_time = time.time()
+        status = "success"
 
-        # Use shared internal method to load the skill
-        self._load_skill_internal(skill_name, source="preload")
+        try:
+            # Temporarily add to skill_metadata if not present (for _load_skill_internal)
+            if skill_name not in self.skill_metadata:
+                self.skill_metadata[skill_name] = skill_config
 
-        # Track user-selected skills
-        if is_user_selected:
-            self._user_selected_skills.add(skill_name)
-            logger.info(
-                "[LoadSkillTool] Marked skill '%s' as user-selected",
-                skill_name,
-            )
+            # Use shared internal method to load the skill
+            if not self._load_skill_internal(skill_name, source="preload"):
+                status = "error"
+                return
+
+            # Track user-selected skills
+            if is_user_selected:
+                self._user_selected_skills.add(skill_name)
+                logger.info(
+                    "[LoadSkillTool] Marked skill '%s' as user-selected",
+                    skill_name,
+                )
+        finally:
+            duration = time.time() - start_time
+            # Record metrics for preloaded skills
+            self._record_skill_metrics(skill_name, status, duration)
 
     def get_prompt_modification(self) -> str:
         """Get prompt modification content for system prompt injection.
@@ -713,13 +723,25 @@ The following skills provide specialized guidance for specific tasks. When your 
             remaining_turns = self.skill_retention_turns - turns_ago
 
             if remaining_turns > 0 and skill_name in self.skill_names:
-                # Use shared internal method to restore the skill
-                if self._load_skill_internal(
-                    skill_name,
-                    remaining_turns=remaining_turns,
-                    source=f"restore (loaded {turns_ago} turns ago)",
-                ):
-                    restored_count += 1
+                start_time = time.time()
+                status = "success"
+
+                try:
+                    # Use shared internal method to restore the skill
+                    if self._load_skill_internal(
+                        skill_name,
+                        remaining_turns=remaining_turns,
+                        source=f"restore (loaded {turns_ago} turns ago)",
+                    ):
+                        restored_count += 1
+                    else:
+                        status = "error"
+                finally:
+                    # Record metrics for restored skills
+                    duration = time.time() - start_time
+                    self._record_skill_metrics(
+                        skill_name, f"restored_{status}", duration
+                    )
             elif remaining_turns <= 0:
                 logger.debug(
                     "[LoadSkillTool] Skill '%s' expired (loaded %d turns ago, "
