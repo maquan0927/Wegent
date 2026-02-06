@@ -17,6 +17,13 @@ Variable substitution:
 - Supports ${{path}} placeholders in MCP server configurations
 - Use task_data dict to provide replacement values (e.g., user.name, user.id)
 - Example: "headers": {"X-User": "${{user.name}}"} -> {"X-User": "john"}
+
+Prometheus metrics:
+- mcp_connections_total: Counter for connection attempts by server and status
+- mcp_disconnections_total: Counter for disconnections by server
+- mcp_tool_discovery_duration_seconds: Histogram for tool discovery latency
+- mcp_requests_total: Counter for tool requests by server, tool, and status
+- mcp_request_duration_seconds: Histogram for tool request latency
 """
 
 import asyncio
@@ -26,6 +33,7 @@ import logging
 import time
 from typing import Any
 
+from chat_shell.core.config import settings
 from langchain_core.tools.base import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import (
@@ -34,7 +42,6 @@ from langchain_mcp_adapters.sessions import (
     StreamableHttpConnection,
 )
 
-from chat_shell.core.config import settings
 from shared.telemetry.decorators import add_span_event, trace_async
 from shared.utils.mcp_utils import replace_mcp_server_variables
 from shared.utils.sensitive_data_masker import mask_sensitive_data
@@ -311,6 +318,10 @@ class MCPClient:
 
         Note: This method is fault-tolerant - if some servers fail to connect,
         tools from successfully connected servers will still be available.
+
+        Prometheus metrics recorded:
+        - mcp_connections_total: Connection attempts by server and status
+        - mcp_tool_discovery_duration_seconds: Tool discovery latency by server
         """
         if not self.connections:
             add_span_event("no_connections_skipped")
@@ -327,12 +338,15 @@ class MCPClient:
 
         async def load_server_tools(
             server_name: str,
-        ) -> tuple[str, list[BaseTool], str | None]:
-            """Load tools from a single server, returning (name, tools, error)."""
+        ) -> tuple[str, list[BaseTool], str | None, float]:
+            """Load tools from a single server, returning (name, tools, error, duration)."""
+            start_time = time.time()
             try:
                 tools = await self._client.get_tools(server_name=server_name)
-                return (server_name, tools, None)
+                duration = time.time() - start_time
+                return (server_name, tools, None, duration)
             except Exception as e:
+                duration = time.time() - start_time
                 error_msg = str(e)
                 # Extract nested exception message if available
                 if hasattr(e, "exceptions"):
@@ -344,7 +358,7 @@ class MCPClient:
                         else:
                             error_msg = str(exc)
                         break
-                return (server_name, [], error_msg)
+                return (server_name, [], error_msg, duration)
 
         # Load tools from all servers in parallel with fault tolerance
         results = await asyncio.gather(
@@ -357,7 +371,7 @@ class MCPClient:
                 # This shouldn't happen since we catch exceptions in load_server_tools
                 logger.error("[MCP] Unexpected error loading tools: %s", result)
                 continue
-            server_name, tools, error = result
+            server_name, tools, error, duration = result
             if error:
                 failed_servers.append(server_name)
                 logger.warning(
@@ -365,8 +379,14 @@ class MCPClient:
                     server_name,
                     error,
                 )
+                # Record metrics for failed connection and tool discovery
+                self._record_connection_metrics(server_name, "error")
+                self._record_tool_discovery_metrics(server_name, "error", duration)
             else:
                 successful_servers.append(server_name)
+                # Record metrics for successful connection and tool discovery
+                self._record_connection_metrics(server_name, "success")
+                self._record_tool_discovery_metrics(server_name, "success", duration)
                 # Wrap each tool with protection, including server_name for metrics
                 for tool in tools:
                     wrapped_tool = wrap_tool_with_protection(
@@ -410,11 +430,70 @@ class MCPClient:
         )
 
     async def disconnect(self) -> None:
-        """Disconnect from all MCP servers."""
+        """Disconnect from all MCP servers.
+
+        Prometheus metrics recorded:
+        - mcp_disconnections_total: Disconnection count by server
+        """
         if self._client:
+            # Record disconnection metrics for all connected servers
+            for server_name in self.connections.keys():
+                self._record_disconnection_metrics(server_name)
             self._client = None
             self._tools = []
             logger.debug("Disconnected from MCP servers")
+
+    def _record_connection_metrics(self, server: str, status: str) -> None:
+        """Record Prometheus metrics for MCP connection attempt.
+
+        Args:
+            server: MCP server name
+            status: Connection status ("success", "error", or "timeout")
+        """
+        if settings.PROMETHEUS_ENABLED:
+            try:
+                from shared.prometheus.metrics.llm import get_mcp_metrics
+
+                metrics = get_mcp_metrics()
+                metrics.observe_connection(server=server, status=status)
+            except Exception as e:
+                logger.debug("[MCP] Failed to record connection metrics: %s", e)
+
+    def _record_disconnection_metrics(self, server: str) -> None:
+        """Record Prometheus metrics for MCP disconnection.
+
+        Args:
+            server: MCP server name
+        """
+        if settings.PROMETHEUS_ENABLED:
+            try:
+                from shared.prometheus.metrics.llm import get_mcp_metrics
+
+                metrics = get_mcp_metrics()
+                metrics.observe_disconnection(server=server)
+            except Exception as e:
+                logger.debug("[MCP] Failed to record disconnection metrics: %s", e)
+
+    def _record_tool_discovery_metrics(
+        self, server: str, status: str, duration: float
+    ) -> None:
+        """Record Prometheus metrics for MCP tool discovery.
+
+        Args:
+            server: MCP server name
+            status: Discovery status ("success" or "error")
+            duration: Discovery duration in seconds
+        """
+        if settings.PROMETHEUS_ENABLED:
+            try:
+                from shared.prometheus.metrics.llm import get_mcp_metrics
+
+                metrics = get_mcp_metrics()
+                metrics.observe_tool_discovery(
+                    server=server, status=status, duration_seconds=duration
+                )
+            except Exception as e:
+                logger.debug("[MCP] Failed to record tool discovery metrics: %s", e)
 
     def get_tools(self, server_names: list[str] | None = None) -> list[BaseTool]:
         """Get LangChain-compatible tools from connected servers.

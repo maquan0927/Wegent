@@ -202,13 +202,24 @@ class LLMMetrics:
 
 
 class MCPMetrics:
-    """MCP tool metrics collection class."""
+    """MCP tool metrics collection class.
+
+    Provides metrics for monitoring MCP tool performance:
+    - Request counts by server, tool, and status
+    - Request latency distribution
+    - Connection attempt counts and status
+    - Disconnection counts
+    - Tool discovery duration
+    """
 
     def __init__(self, registry=None):
         """Initialize MCP metrics."""
         self._registry = registry or get_registry()
         self._requests_total: Optional[Counter] = None
         self._request_duration: Optional[Histogram] = None
+        self._connections_total: Optional[Counter] = None
+        self._disconnections_total: Optional[Counter] = None
+        self._tool_discovery_duration: Optional[Histogram] = None
 
     @property
     def requests_total(self) -> Counter:
@@ -235,6 +246,43 @@ class MCPMetrics:
             )
         return self._request_duration
 
+    @property
+    def connections_total(self) -> Counter:
+        """Get or create the MCP connections total counter."""
+        if self._connections_total is None:
+            self._connections_total = Counter(
+                "mcp_connections_total",
+                "Total number of MCP server connection attempts",
+                labelnames=["server", "status"],
+                registry=self._registry,
+            )
+        return self._connections_total
+
+    @property
+    def disconnections_total(self) -> Counter:
+        """Get or create the MCP disconnections total counter."""
+        if self._disconnections_total is None:
+            self._disconnections_total = Counter(
+                "mcp_disconnections_total",
+                "Total number of MCP server disconnections",
+                labelnames=["server"],
+                registry=self._registry,
+            )
+        return self._disconnections_total
+
+    @property
+    def tool_discovery_duration(self) -> Histogram:
+        """Get or create the MCP tool discovery duration histogram."""
+        if self._tool_discovery_duration is None:
+            self._tool_discovery_duration = Histogram(
+                "mcp_tool_discovery_duration_seconds",
+                "Time taken to discover tools from MCP server",
+                labelnames=["server", "status"],
+                buckets=TOOL_DURATION_BUCKETS,
+                registry=self._registry,
+            )
+        return self._tool_discovery_duration
+
     def observe_request(
         self,
         server: str,
@@ -247,11 +295,52 @@ class MCPMetrics:
         Args:
             server: MCP server name
             tool: Tool name
-            status: Request status ("success" or "error")
+            status: Request status ("success", "error", or "timeout")
             duration_seconds: Request duration in seconds
         """
         self.requests_total.labels(server=server, tool=tool, status=status).inc()
         self.request_duration.labels(server=server, tool=tool, status=status).observe(
+            duration_seconds
+        )
+
+    def observe_connection(
+        self,
+        server: str,
+        status: str,
+    ) -> None:
+        """Record an MCP server connection attempt.
+
+        Args:
+            server: MCP server name
+            status: Connection status ("success", "error", or "timeout")
+        """
+        self.connections_total.labels(server=server, status=status).inc()
+
+    def observe_disconnection(
+        self,
+        server: str,
+    ) -> None:
+        """Record an MCP server disconnection.
+
+        Args:
+            server: MCP server name
+        """
+        self.disconnections_total.labels(server=server).inc()
+
+    def observe_tool_discovery(
+        self,
+        server: str,
+        status: str,
+        duration_seconds: float,
+    ) -> None:
+        """Record tool discovery duration for an MCP server.
+
+        Args:
+            server: MCP server name
+            status: Discovery status ("success" or "error")
+            duration_seconds: Discovery duration in seconds
+        """
+        self.tool_discovery_duration.labels(server=server, status=status).observe(
             duration_seconds
         )
 
