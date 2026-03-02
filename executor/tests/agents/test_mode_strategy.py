@@ -13,16 +13,16 @@ import json
 import os
 import stat
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from executor.agents.claude_code.docker_mode_strategy import DockerModeStrategy
 from executor.agents.claude_code.local_mode_strategy import LocalModeStrategy
 from executor.agents.claude_code.mode_strategy import (
-    ExecutionModeStrategy,
     ModeStrategyFactory,
 )
+from shared.models.execution import ExecutionRequest
 
 
 class TestModeStrategyFactory:
@@ -383,16 +383,27 @@ class TestDockerModeStrategy:
         assert options["skip_existing"] is False
 
 
+def create_mock_emitter():
+    """Create a mock emitter for testing."""
+    emitter = MagicMock()
+    emitter.in_progress = AsyncMock()
+    emitter.start = AsyncMock()
+    emitter.done = AsyncMock()
+    emitter.error = AsyncMock()
+    emitter.text_delta = AsyncMock()
+    return emitter
+
+
 class TestStrategyIntegration:
     """Integration tests for strategy pattern with ClaudeCodeAgent."""
 
     @pytest.fixture
     def task_data(self):
         """Sample task data."""
-        return {
-            "task_id": 12345,
-            "subtask_id": 67890,
-            "bot": [
+        return ExecutionRequest(
+            task_id=12345,
+            subtask_id=67890,
+            bot=[
                 {
                     "agent_config": {
                         "env": {
@@ -402,20 +413,25 @@ class TestStrategyIntegration:
                     }
                 }
             ],
-        }
+        )
 
-    def test_agent_initializes_local_strategy(self, task_data):
+    @pytest.fixture
+    def mock_emitter(self):
+        """Create a mock emitter for testing."""
+        return create_mock_emitter()
+
+    def test_agent_initializes_local_strategy(self, task_data, mock_emitter):
         """Test ClaudeCodeAgent initializes LocalModeStrategy in local mode."""
         with patch("executor.config.config.EXECUTOR_MODE", "local"):
             from executor.agents.claude_code.claude_code_agent import ClaudeCodeAgent
 
-            agent = ClaudeCodeAgent(task_data)
+            agent = ClaudeCodeAgent(task_data, mock_emitter)
             assert isinstance(agent._mode_strategy, LocalModeStrategy)
 
-    def test_agent_initializes_docker_strategy(self, task_data):
+    def test_agent_initializes_docker_strategy(self, task_data, mock_emitter):
         """Test ClaudeCodeAgent initializes DockerModeStrategy in docker mode."""
         with patch("executor.config.config.EXECUTOR_MODE", ""):
             from executor.agents.claude_code.claude_code_agent import ClaudeCodeAgent
 
-            agent = ClaudeCodeAgent(task_data)
+            agent = ClaudeCodeAgent(task_data, mock_emitter)
             assert isinstance(agent._mode_strategy, DockerModeStrategy)

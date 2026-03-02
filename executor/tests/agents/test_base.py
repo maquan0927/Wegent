@@ -2,11 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from executor.agents.base import Agent
+from shared.models.execution import ExecutionRequest
 from shared.status import TaskStatus
 
 
@@ -16,33 +17,44 @@ class TestAgent:
     @pytest.fixture
     def task_data(self):
         """Sample task data for testing"""
-        return {
-            "task_id": 123,
-            "subtask_id": 456,
-            "task_title": "Test Task",
-            "subtask_title": "Test Subtask",
-            "git_url": "https://github.com/test/repo.git",
-            "branch_name": "main",
-            "user": {
+        return ExecutionRequest(
+            task_id=123,
+            subtask_id=456,
+            task_title="Test Task",
+            subtask_title="Test Subtask",
+            git_url="https://github.com/test/repo.git",
+            branch_name="main",
+            user={
                 "user_name": "testuser",
                 "git_token": "test_token",
                 "git_id": "12345",
                 "git_login": "testuser",
                 "git_email": "test@example.com",
             },
-        }
+        )
 
     @pytest.fixture
-    def agent(self, task_data):
+    def mock_emitter(self):
+        """Create a mock emitter for testing"""
+        emitter = MagicMock()
+        emitter.in_progress = AsyncMock()
+        emitter.start = AsyncMock()
+        emitter.done = AsyncMock()
+        emitter.error = AsyncMock()
+        emitter.text_delta = AsyncMock()
+        return emitter
+
+    @pytest.fixture
+    def agent(self, task_data, mock_emitter):
         """Create a test agent instance"""
-        return Agent(task_data)
+        return Agent(task_data, mock_emitter)
 
     def test_agent_initialization(self, agent, task_data):
         """Test agent initialization with task data"""
-        assert agent.task_id == task_data["task_id"]
-        assert agent.subtask_id == task_data["subtask_id"]
-        assert agent.task_title == task_data["task_title"]
-        assert agent.subtask_title == task_data["subtask_title"]
+        assert agent.task_id == task_data.task_id
+        assert agent.subtask_id == task_data.subtask_id
+        assert agent.task_title == task_data.task_title
+        assert agent.subtask_title == task_data.subtask_title
         assert agent.execution_status == TaskStatus.INITIALIZED
         assert agent.project_path is None
 
@@ -50,9 +62,10 @@ class TestAgent:
         """Test get_name returns class name"""
         assert agent.get_name() == "Agent"
 
-    def test_pre_execute_default(self, agent):
+    @pytest.mark.asyncio
+    async def test_pre_execute_default(self, agent):
         """Test default pre_execute returns SUCCESS"""
-        status = agent.pre_execute()
+        status = await agent.pre_execute()
         assert status == TaskStatus.SUCCESS
 
     def test_execute_not_implemented(self, agent):
@@ -65,28 +78,25 @@ class TestAgent:
         status = agent.initialize()
         assert status == TaskStatus.SUCCESS
 
-    @patch("executor.agents.base.CallbackClient")
-    def test_report_progress(self, mock_callback_class, agent):
-        """Test report_progress sends callback"""
-        mock_callback = MagicMock()
-        mock_callback_class.return_value = mock_callback
-
-        # Create new agent to use mocked callback
-        agent_with_mock = Agent(agent.task_data)
-
-        agent_with_mock.report_progress(
+    def test_report_progress(self, agent, mock_emitter):
+        """Test report_progress sends callback via emitter"""
+        # The agent already has mock_emitter injected via fixture
+        # report_progress calls self.get_emitter().in_progress()
+        agent.report_progress(
             progress=50,
             status="running",
             message="Test message",
             result={"key": "value"},
         )
 
-        mock_callback.send_callback.assert_called_once()
+        # Verify emitter.in_progress was called
+        mock_emitter.in_progress.assert_called_once()
 
+    @pytest.mark.asyncio
     @patch("executor.agents.base.git_util.clone_repo")
     @patch("executor.agents.base.git_util.get_repo_name_from_url")
     @patch("os.path.exists")
-    def test_download_code_success(
+    async def test_download_code_success(
         self, mock_exists, mock_get_repo_name, mock_clone, agent
     ):
         """Test successful code download"""
@@ -94,52 +104,58 @@ class TestAgent:
         mock_get_repo_name.return_value = "repo"
         mock_clone.return_value = (True, None)
 
-        with patch.object(agent, "setup_git_config"):
-            agent.download_code()
+        with patch.object(agent, "setup_git_config", new_callable=AsyncMock):
+            await agent.download_code()
 
         mock_clone.assert_called_once()
         assert agent.project_path is not None
 
+    @pytest.mark.asyncio
     @patch("executor.agents.base.git_util.get_repo_name_from_url")
     @patch("os.path.exists")
-    def test_download_code_already_exists(self, mock_exists, mock_get_repo_name, agent):
+    async def test_download_code_already_exists(
+        self, mock_exists, mock_get_repo_name, agent
+    ):
         """Test code download when project already exists"""
         mock_exists.return_value = True
         mock_get_repo_name.return_value = "repo"
 
-        agent.download_code()
+        await agent.download_code()
 
         # Should not raise exception
         assert True
 
-    def test_download_code_empty_git_url(self, agent):
+    @pytest.mark.asyncio
+    async def test_download_code_empty_git_url(self, agent):
         """Test download_code with empty git_url"""
-        agent.task_data["git_url"] = ""
-        agent.download_code()
+        agent.task_data.git_url = ""
+        await agent.download_code()
         # Should not raise exception
         assert True
 
+    @pytest.mark.asyncio
     @patch("executor.agents.base.git_util.set_git_config")
-    def test_setup_git_config(self, mock_set_config, agent):
+    async def test_setup_git_config(self, mock_set_config, agent):
         """Test git config setup"""
         mock_set_config.return_value = (True, None)
-        user_config = agent.task_data["user"]
+        user_config = agent.task_data.user
         project_path = "/test/path"
 
-        agent.setup_git_config(user_config, project_path)
+        await agent.setup_git_config(user_config, project_path)
 
         mock_set_config.assert_called_once_with(
             project_path, user_config["git_login"], user_config["git_email"]
         )
 
+    @pytest.mark.asyncio
     @patch("executor.agents.base.git_util.set_git_config")
-    def test_setup_git_config_no_email(self, mock_set_config, agent):
+    async def test_setup_git_config_no_email(self, mock_set_config, agent):
         """Test git config setup without email"""
         mock_set_config.return_value = (True, None)
         user_config = {"git_id": "12345", "git_login": "testuser"}
         project_path = "/test/path"
 
-        agent.setup_git_config(user_config, project_path)
+        await agent.setup_git_config(user_config, project_path)
 
         # Should generate email from git_id and git_login
         expected_email = "12345+testuser@users.noreply.github.com"
@@ -174,48 +190,67 @@ class TestAgentHandle:
 
     @pytest.fixture
     def task_data(self):
-        return {
-            "task_id": 123,
-            "subtask_id": 456,
-            "task_title": "Test Task",
-            "subtask_title": "Test Subtask",
-        }
+        return ExecutionRequest(
+            task_id=123,
+            subtask_id=456,
+            task_title="Test Task",
+            subtask_title="Test Subtask",
+        )
 
     @pytest.fixture
-    def concrete_agent(self, task_data):
-        return ConcreteAgent(task_data)
+    def mock_emitter(self):
+        """Create a mock emitter for testing"""
+        emitter = MagicMock()
+        emitter.in_progress = AsyncMock()
+        emitter.start = AsyncMock()
+        emitter.done = AsyncMock()
+        emitter.error = AsyncMock()
+        emitter.text_delta = AsyncMock()
+        return emitter
 
-    def test_handle_success(self, concrete_agent):
+    @pytest.fixture
+    def concrete_agent(self, task_data, mock_emitter):
+        return ConcreteAgent(task_data, mock_emitter)
+
+    @pytest.mark.asyncio
+    async def test_handle_success(self, concrete_agent):
         """Test successful handle execution"""
-        status, error = concrete_agent.handle()
+        status, error = await concrete_agent.handle()
 
         assert status == TaskStatus.SUCCESS
         assert error is None
 
-    def test_handle_with_pre_executed_status(self, concrete_agent):
+    @pytest.mark.asyncio
+    async def test_handle_with_pre_executed_status(self, concrete_agent):
         """Test handle with pre_executed parameter"""
-        status, error = concrete_agent.handle(pre_executed=TaskStatus.PRE_EXECUTED)
+        status, error = await concrete_agent.handle(
+            pre_executed=TaskStatus.PRE_EXECUTED
+        )
 
         assert status == TaskStatus.SUCCESS
         assert error is None
         assert concrete_agent.execution_status == TaskStatus.RUNNING
 
-    def test_handle_pre_execute_failure(self, concrete_agent):
+    @pytest.mark.asyncio
+    async def test_handle_pre_execute_failure(self, concrete_agent):
         """Test handle when pre_execute fails"""
         with patch.object(
-            concrete_agent, "pre_execute", return_value=TaskStatus.FAILED
+            concrete_agent, "pre_execute", new=AsyncMock(return_value=TaskStatus.FAILED)
         ):
-            status, error = concrete_agent.handle()
+            status, error = await concrete_agent.handle()
 
         assert status == TaskStatus.FAILED
         assert error is not None
 
-    def test_handle_execute_exception(self, concrete_agent):
+    @pytest.mark.asyncio
+    async def test_handle_execute_exception(self, concrete_agent):
         """Test handle when execute raises exception"""
         with patch.object(
             concrete_agent, "execute", side_effect=Exception("Test error")
         ):
-            status, error = concrete_agent.handle(pre_executed=TaskStatus.PRE_EXECUTED)
+            status, error = await concrete_agent.handle(
+                pre_executed=TaskStatus.PRE_EXECUTED
+            )
 
         assert status == TaskStatus.FAILED
         assert error is not None

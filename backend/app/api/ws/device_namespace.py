@@ -19,11 +19,11 @@ Events:
 - device:heartbeat: Device sends heartbeat every 30s
 - device:status: Device reports status (idle/busy)
 - task:execute: Backend pushes task to device
-- task:progress: Device reports execution progress
-- task:complete: Device reports task completion
+- response.*: OpenAI Responses API streaming events from executor
 - disconnect: Cleanup on device disconnection
 """
 
+import asyncio
 import logging
 import uuid
 from contextlib import contextmanager
@@ -36,8 +36,10 @@ from sqlalchemy.orm import Session
 
 from app.api.ws.decorators import trace_websocket_event
 from app.core.auth_utils import is_api_key, verify_api_key
+from app.core.events import TaskCompletedEvent, get_event_bus
 from app.db.session import SessionLocal
 from app.models.subtask import Subtask, SubtaskStatus
+from app.models.task import TaskResource
 from app.schemas.device import (
     DeviceHeartbeatPayload,
     DeviceOfflineEvent,
@@ -48,8 +50,12 @@ from app.schemas.device import (
     DeviceStatusPayload,
 )
 from app.services.chat.access import get_token_expiry, verify_jwt_token
-from app.services.chat.ws_emitter import get_ws_emitter
+from app.services.chat.webpage_ws_chat_emitter import get_extended_emitter
 from app.services.device_service import device_service
+from app.services.execution.dispatcher import ResponsesAPIEventParser
+from app.services.execution.emitters.status_updating import StatusUpdatingEmitter
+from app.services.execution.emitters.websocket import WebSocketResultEmitter
+from shared.models import EventType
 from shared.telemetry.context import set_request_context, set_user_context
 
 logger = logging.getLogger(__name__)
@@ -67,227 +73,6 @@ def _db_session() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
-
-
-@dataclass
-class ProgressUpdateResult:
-    """Result of progress update operation."""
-
-    success: bool
-    error: Optional[str] = None
-    task_id: Optional[int] = None
-    subtask_id: Optional[int] = None
-    delta_content: str = ""
-    full_content: str = ""
-    new_offset: int = 0
-    has_thinking: bool = False
-    thinking: Optional[Any] = None
-    workbench: Optional[Any] = None
-    is_completed: bool = False
-
-
-@dataclass
-class CompleteUpdateResult:
-    """Result of task complete update operation."""
-
-    success: bool
-    error: Optional[str] = None
-    task_id: Optional[int] = None
-    subtask_id: Optional[int] = None
-    user_id: Optional[int] = None
-    status: str = "COMPLETED"
-    content: str = ""
-    thinking: Optional[Any] = None
-    workbench: Optional[Any] = None
-    error_message: Optional[str] = None
-    message_id: Optional[int] = None
-
-
-def _update_subtask_progress(
-    subtask_id: int, device_id: str, data: dict
-) -> ProgressUpdateResult:
-    """
-    Update subtask progress in database.
-
-    This function executes database operations and releases connection immediately.
-    Returns all data needed for subsequent WebSocket emissions.
-    """
-    try:
-        with _db_session() as db:
-            subtask = db.query(Subtask).filter(Subtask.id == subtask_id).first()
-            if not subtask:
-                return ProgressUpdateResult(success=False, error="Subtask not found")
-
-            expected_executor = f"device-{device_id}"
-            if subtask.executor_name != expected_executor:
-                return ProgressUpdateResult(
-                    success=False, error="Subtask does not belong to this device"
-                )
-
-            # Update status if provided
-            if "status" in data:
-                try:
-                    # Normalize status to uppercase since SubtaskStatus enum uses uppercase values
-                    status_value = data["status"]
-                    if isinstance(status_value, str):
-                        status_value = status_value.upper()
-                    subtask.status = SubtaskStatus(status_value)
-                except ValueError:
-                    logger.warning(
-                        f"[Device WS] Invalid status value: {data['status']}, skipping status update"
-                    )
-                    pass
-
-            # Update progress if provided
-            if "progress" in data:
-                subtask.progress = data["progress"]
-
-            # Process result with delta calculation
-            result_data = data.get("result")
-            delta_content = ""
-            full_content = ""
-            new_offset = 0
-            has_thinking = False
-            thinking = None
-            workbench = None
-
-            if result_data is not None:
-                full_content = result_data.get("value", "") or ""
-                thinking = result_data.get("thinking")
-                workbench = result_data.get("workbench")
-                has_thinking = thinking is not None
-
-                # Get last emitted offset
-                last_offset = 0
-                if subtask.result and isinstance(subtask.result, dict):
-                    last_offset = subtask.result.get("_last_emitted_offset", 0)
-
-                # Calculate delta
-                delta_content = full_content[last_offset:]
-                new_offset = len(full_content)
-
-                # Update subtask result
-                subtask.result = {
-                    "value": full_content,
-                    "thinking": thinking,
-                    "workbench": workbench,
-                    "_last_emitted_offset": new_offset,
-                }
-
-            task_id = subtask.task_id
-            # Normalize status to uppercase for comparison
-            raw_status = data.get("status", "")
-            normalized_status = (
-                raw_status.upper() if isinstance(raw_status, str) else raw_status
-            )
-            is_completed = normalized_status == "COMPLETED"
-
-            # Commit happens automatically when exiting context manager
-
-        return ProgressUpdateResult(
-            success=True,
-            task_id=task_id,
-            subtask_id=subtask_id,
-            delta_content=delta_content,
-            full_content=full_content,
-            new_offset=new_offset,
-            has_thinking=has_thinking,
-            thinking=thinking,
-            workbench=workbench,
-            is_completed=is_completed,
-        )
-
-    except Exception as e:
-        logger.error(f"[Device WS] Error updating subtask progress: {e}")
-        return ProgressUpdateResult(success=False, error=str(e))
-
-
-def _update_subtask_complete(
-    subtask_id: int, device_id: str, user_id: int, data: dict
-) -> CompleteUpdateResult:
-    """
-    Update subtask completion in database.
-
-    This function executes database operations and releases connection immediately.
-    Returns all data needed for subsequent WebSocket emissions.
-    """
-    try:
-        with _db_session() as db:
-            subtask = db.query(Subtask).filter(Subtask.id == subtask_id).first()
-            if not subtask:
-                return CompleteUpdateResult(success=False, error="Subtask not found")
-
-            expected_executor = f"device-{device_id}"
-            if subtask.executor_name != expected_executor:
-                return CompleteUpdateResult(
-                    success=False, error="Subtask does not belong to this device"
-                )
-
-            # Update status - normalize to uppercase since SubtaskStatus enum uses uppercase values
-            status_str = data.get("status", "COMPLETED")
-            if isinstance(status_str, str):
-                status_str = status_str.upper()
-            try:
-                subtask.status = SubtaskStatus(status_str)
-            except ValueError:
-                logger.warning(
-                    f"[Device WS] Invalid status value in complete: {data.get('status')}, defaulting to COMPLETED"
-                )
-                subtask.status = SubtaskStatus.COMPLETED
-
-            subtask.progress = data.get("progress", 100)
-            subtask.completed_at = datetime.now()
-
-            if "result" in data:
-                subtask.result = data["result"]
-
-            error_message = data.get("error_message")
-            if error_message:
-                subtask.error_message = error_message
-
-            # Update task status
-            from app.schemas.task import TaskUpdate
-            from app.services.adapters.task_kinds import task_kinds_service
-
-            # Determine task status based on subtask status
-            if subtask.status == SubtaskStatus.FAILED:
-                task_status = "FAILED"
-            elif subtask.status == SubtaskStatus.CANCELLED:
-                task_status = "CANCELLED"
-            else:
-                task_status = "COMPLETED"
-            try:
-                task_kinds_service.update_task(
-                    db=db,
-                    task_id=subtask.task_id,
-                    obj_in=TaskUpdate(status=task_status),
-                    user_id=user_id,
-                )
-            except Exception as e:
-                logger.error(
-                    f"[Device WS] Failed to update task {subtask.task_id} status: {e}"
-                )
-
-            # Collect data for WebSocket emission
-            result = data.get("result", {})
-            content = result.get("value", "") if result else ""
-
-            return CompleteUpdateResult(
-                success=True,
-                task_id=subtask.task_id,
-                subtask_id=subtask_id,
-                user_id=user_id,
-                status=task_status,
-                content=content,
-                thinking=result.get("thinking") if result else None,
-                workbench=result.get("workbench") if result else None,
-                error_message=error_message,
-                message_id=subtask.message_id,
-            )
-
-    except Exception as e:
-        logger.error(f"[Device WS] Error updating subtask completion: {e}")
-        return CompleteUpdateResult(success=False, error=str(e))
 
 
 @dataclass
@@ -373,7 +158,7 @@ def _handle_device_disconnect(user_id: int, device_id: str) -> list[FailedSubtas
 
 
 def _register_device(
-    user_id: int, device_id: str, name: str
+    user_id: int, device_id: str, name: str, client_ip: Optional[str] = None
 ) -> tuple[bool, Optional[str]]:
     """
     Register or update device CRD in database.
@@ -382,6 +167,7 @@ def _register_device(
         user_id: Device owner user ID
         device_id: Device unique identifier (stored in Kind.name)
         name: Device display name
+        client_ip: Device's client IP address
 
     Returns (success, error_message).
     """
@@ -392,6 +178,7 @@ def _register_device(
                 user_id=user_id,
                 device_id=device_id,
                 name=name,
+                client_ip=client_ip,
             )
         return True, None
     except Exception as e:
@@ -441,9 +228,39 @@ class DeviceNamespace(socketio.AsyncNamespace):
             "device:register": "on_device_register",
             "device:heartbeat": "on_device_heartbeat",
             "device:status": "on_device_status",
-            "task:progress": "on_task_progress",
-            "task:complete": "on_task_complete",
         }
+
+        # Shared event parser for OpenAI Responses API events
+        self._event_parser = ResponsesAPIEventParser()
+
+        # Known OpenAI Responses API event prefixes
+        self._responses_api_prefixes = ("response.", "error")
+
+        # Per-subtask locks to ensure events are processed in order
+        # This prevents race conditions when multiple response.output_text.delta
+        # events arrive concurrently for the same subtask
+        self._subtask_locks: Dict[int, asyncio.Lock] = {}
+
+    def _get_subtask_lock(self, subtask_id: int) -> asyncio.Lock:
+        """Get or create a lock for the given subtask.
+
+        Args:
+            subtask_id: Subtask ID
+
+        Returns:
+            asyncio.Lock for the subtask
+        """
+        if subtask_id not in self._subtask_locks:
+            self._subtask_locks[subtask_id] = asyncio.Lock()
+        return self._subtask_locks[subtask_id]
+
+    def _cleanup_subtask_lock(self, subtask_id: int) -> None:
+        """Clean up the lock for a completed subtask.
+
+        Args:
+            subtask_id: Subtask ID
+        """
+        self._subtask_locks.pop(subtask_id, None)
 
     @trace_websocket_event(
         exclude_events={"connect"},
@@ -474,7 +291,155 @@ class DeviceNamespace(socketio.AsyncNamespace):
                 )
                 return await handler(sid, *args)
 
+        # Handle OpenAI Responses API events (e.g., response.output_text.delta)
+        if event.startswith(self._responses_api_prefixes):
+            return await self._handle_responses_api_event(sid, event, *args)
+
         return await super().trigger_event(event, sid, *args)
+
+    def _get_client_ip(self, environ: dict) -> Optional[str]:
+        """Extract client IP from WSGI environ.
+
+        Checks X-Forwarded-For header first (for proxied connections),
+        then falls back to REMOTE_ADDR.
+
+        Args:
+            environ: WSGI environ dict
+
+        Returns:
+            Client IP address or None
+        """
+        # Check X-Forwarded-For header (common for proxied connections)
+        forwarded_for = environ.get("HTTP_X_FORWARDED_FOR")
+        if forwarded_for:
+            # X-Forwarded-For can contain multiple IPs, take the first one
+            return forwarded_for.split(",")[0].strip()
+
+        # Check X-Real-IP header
+        real_ip = environ.get("HTTP_X_REAL_IP")
+        if real_ip:
+            return real_ip
+
+        # Fall back to REMOTE_ADDR
+        return environ.get("REMOTE_ADDR")
+
+    async def _match_cloud_device(
+        self, user_id: int, client_ip: str, executor_device_id: str
+    ) -> Optional[str]:
+        """Match cloud device and update its device_id.
+
+        When a cloud device executor connects, it uses a self-generated device_id.
+        This method finds the corresponding cloud device CRD by using user-based
+        matching (finds cloud devices that haven't been bound to an executor yet).
+
+        Args:
+            user_id: User ID
+            client_ip: WebSocket client IP address (kept for logging)
+            executor_device_id: Device ID generated by executor
+
+        Returns:
+            Cloud device ID (sandbox_id) if matched, None otherwise
+        """
+        try:
+            with _db_session() as db:
+                # Find all cloud devices for this user
+                from sqlalchemy import and_
+
+                from app.models.kind import Kind
+                from app.schemas.device import DeviceType
+
+                cloud_devices = (
+                    db.query(Kind)
+                    .filter(
+                        and_(
+                            Kind.user_id == user_id,
+                            Kind.kind == "Device",
+                            Kind.namespace == "default",
+                            Kind.is_active == True,
+                        )
+                    )
+                    .all()
+                )
+
+                logger.info(
+                    f"[Device WS] Cloud device matching: "
+                    f"user_id={user_id}, client_ip={client_ip}, "
+                    f"cloud_device_count={len(cloud_devices)}"
+                )
+
+                # User-based config matching: find cloud devices that haven't been bound yet
+                # (device.name still starts with 'sandbox-', meaning no executor has registered)
+                logger.info(
+                    f"[Device WS] Trying user-based cloud device matching: "
+                    f"user_id={user_id}"
+                )
+
+                for device in cloud_devices:
+                    spec = device.json.get("spec", {})
+                    if spec.get("deviceType") != DeviceType.CLOUD.value:
+                        continue
+
+                    # Skip devices already bound to an executor (name is UUID, not sandbox ID)
+                    cloud_config = spec.get("cloudConfig", {})
+                    sandbox_id = cloud_config.get("sandboxId", device.name)
+                    if device.name != sandbox_id:
+                        continue
+
+                    logger.info(
+                        f"[Device WS] User-based cloud device match: "
+                        f"sandbox_id={sandbox_id}, "
+                        f"new_device_id={executor_device_id}"
+                    )
+
+                    return await self._update_cloud_device_id(
+                        db, user_id, device, executor_device_id, sandbox_id
+                    )
+
+        except Exception as e:
+            logger.error(f"[Device WS] Error matching cloud device by IP: {e}")
+
+        return None
+
+    async def _update_cloud_device_id(
+        self,
+        db: Session,
+        user_id: int,
+        device: Any,
+        executor_device_id: str,
+        sandbox_id: str,
+    ) -> str:
+        """Update cloud device ID in CRD and clean up old Redis key.
+
+        Args:
+            db: Database session
+            user_id: User ID
+            device: Kind device model
+            executor_device_id: New device ID from executor
+            sandbox_id: Sandbox ID
+
+        Returns:
+            Sandbox ID
+        """
+        # Update CRD with executor's device_id
+        # Use deepcopy to ensure SQLAlchemy detects the JSON column change
+        import copy
+
+        from sqlalchemy.orm.attributes import flag_modified
+
+        device_json = copy.deepcopy(device.json)
+        old_device_id = device.name
+        device_json["metadata"]["name"] = executor_device_id
+        device_json["spec"]["deviceId"] = executor_device_id
+        device.name = executor_device_id
+        device.json = device_json
+        flag_modified(device, "json")
+        db.add(device)
+        db.commit()
+
+        # Clean up old Redis key if exists
+        # TODO: Add cloud_device_provider.unregister() call if needed for cloud device management
+
+        return sandbox_id
 
     async def on_connect(self, sid: str, environ: dict, auth: Optional[dict] = None):
         """
@@ -553,6 +518,9 @@ class DeviceNamespace(socketio.AsyncNamespace):
             # Extract token expiry for JWT
             token_exp = get_token_expiry(token)
 
+        # Get client IP from environ
+        client_ip = self._get_client_ip(environ)
+
         # Save user info to session (device_id will be added on register)
         await self.save_session(
             sid,
@@ -565,6 +533,7 @@ class DeviceNamespace(socketio.AsyncNamespace):
                 "auth_type": auth_type,
                 "device_id": None,  # Set on device:register
                 "registered": False,
+                "client_ip": client_ip,  # For cloud device matching
             },
         )
 
@@ -612,26 +581,16 @@ class DeviceNamespace(socketio.AsyncNamespace):
                 failed_subtasks = _handle_device_disconnect(user_id, device_id)
 
                 # WebSocket emissions happen AFTER database connection is released
-                ws_emitter = get_ws_emitter()
-                if ws_emitter:
-                    # Track unique task IDs to emit task:status only once per task
-                    emitted_task_ids = set()
-                    for info in failed_subtasks:
-                        await ws_emitter.emit_chat_error(
-                            task_id=info.task_id,
-                            subtask_id=info.subtask_id,
-                            error="Device disconnected",
-                            message_id=info.message_id,
-                        )
-                        # Emit task:status to notify frontend of task failure
-                        if info.task_id not in emitted_task_ids:
-                            await ws_emitter.emit_task_status(
-                                user_id=info.user_id,
-                                task_id=info.task_id,
-                                status="FAILED",
-                                progress=0,
-                            )
-                            emitted_task_ids.add(info.task_id)
+                extended_emitter = get_extended_emitter()
+                # Track unique task IDs to emit task:status only once per task
+                emitted_task_ids = set()
+                for info in failed_subtasks:
+                    await extended_emitter.emit_chat_error(
+                        task_id=info.task_id,
+                        subtask_id=info.subtask_id,
+                        error="Device disconnected",
+                        message_id=info.message_id,
+                    )
 
                 # Broadcast device offline event
                 await self._broadcast_device_offline(user_id, device_id)
@@ -670,13 +629,32 @@ class DeviceNamespace(socketio.AsyncNamespace):
 
         logger.info(
             f"[Device WS] device:register user={user_id}, device_id={payload.device_id}, "
-            f"name={payload.name}, executor_version={payload.executor_version}"
+            f"name={payload.name}, executor_version={payload.executor_version}, client_ip={payload.client_ip}"
         )
 
-        # Database operation: quick in, quick out
-        success, error = _register_device(user_id, payload.device_id, payload.name)
-        if not success:
-            return {"error": f"Registration failed: {error}"}
+        # Check if this is a cloud device registration (by IP matching)
+        # Prefer self-reported IP from executor, fall back to WebSocket client IP
+        client_ip = payload.client_ip or session.get("client_ip")
+        is_cloud_device = False
+        if client_ip:
+            cloud_device_id = await self._match_cloud_device(
+                user_id, client_ip, payload.device_id
+            )
+            if cloud_device_id:
+                is_cloud_device = True
+                logger.info(
+                    f"[Device WS] Matched cloud device: executor_device_id={payload.device_id}, "
+                    f"cloud_device_id={cloud_device_id}"
+                )
+
+        # Database operation: skip if cloud device already updated in IP matching
+        # Pass client_ip to _register_device for tracking
+        if not is_cloud_device:
+            success, error = _register_device(
+                user_id, payload.device_id, payload.name, payload.client_ip
+            )
+            if not success:
+                return {"error": f"Registration failed: {error}"}
 
         # Redis and session operations happen AFTER database connection is released
         await device_service.set_device_online(
@@ -799,18 +777,26 @@ class DeviceNamespace(socketio.AsyncNamespace):
         return {"success": True}
 
     # ============================================================
-    # Task Execution Events
+    # OpenAI Responses API Event Handler
     # ============================================================
 
-    async def on_task_progress(self, sid: str, data: dict) -> dict:
-        """
-        Handle task:progress event from device.
+    async def _handle_responses_api_event(
+        self, sid: str, event_type: str, *args
+    ) -> dict:
+        """Handle OpenAI Responses API events from local executor.
 
-        Updates subtask progress and emits chat:chunk event.
+        Reuses the same processing chain as /api/internal/callback:
+        ResponsesAPIEventParser -> StatusUpdatingEmitter -> WebSocketResultEmitter
+
+        IMPORTANT: Uses per-subtask locking to ensure events are processed in order.
+        This prevents race conditions when multiple response.output_text.delta events
+        arrive concurrently for the same subtask, which would cause text content to
+        be appended to Redis in the wrong order.
 
         Args:
             sid: Socket ID
-            data: {"subtask_id": int, "status": str, "progress": int, "result": dict}
+            event_type: OpenAI Responses API event type (e.g., response.output_text.delta)
+            *args: Event arguments (first arg is the event data dict)
 
         Returns:
             {"success": True} or {"error": str}
@@ -822,191 +808,138 @@ class DeviceNamespace(socketio.AsyncNamespace):
         if not user_id or not device_id:
             return {"error": "Not authenticated or not registered"}
 
+        if not args:
+            return {"error": "Missing event data"}
+
+        data = args[0]
+        if not isinstance(data, dict):
+            return {"error": "Invalid event data format"}
+
+        task_id = data.get("task_id")
         subtask_id = data.get("subtask_id")
-        if not subtask_id:
-            return {"error": "Missing subtask_id"}
+        event_data = data.get("data", {})
+        message_id = data.get("message_id")
 
-        logger.info(
-            f"[Device WS] task:progress received: subtask_id={subtask_id}, data={data}"
-        )
-
-        # Database operation: quick in, quick out
-        result = _update_subtask_progress(subtask_id, device_id, data)
-
-        if not result.success:
-            return {"error": result.error}
-
-        # WebSocket emission happens AFTER database connection is released
-        if result.delta_content or result.has_thinking:
-            ws_emitter = get_ws_emitter()
-            if ws_emitter:
-                await ws_emitter.emit_chat_chunk(
-                    task_id=result.task_id,
-                    subtask_id=subtask_id,
-                    content=result.delta_content,
-                    offset=result.new_offset,
-                    result={
-                        "value": result.full_content,
-                        "thinking": result.thinking,
-                        "workbench": result.workbench,
-                    },
-                )
-                logger.debug(
-                    f"[Device WS] Emitted chat:chunk: subtask={subtask_id}, "
-                    f"delta_len={len(result.delta_content)}, has_thinking={result.has_thinking}"
-                )
-
-            # Send streaming progress to IM channels (DingTalk, Telegram) if callback info exists
-            try:
-                from app.services.channels.dingtalk.callback import (
-                    dingtalk_callback_service,
-                )
-
-                # Build content for DingTalk - use full_content which includes everything
-                # The emitter will handle streaming updates
-                if result.full_content or result.thinking:
-                    await dingtalk_callback_service.send_progress(
-                        task_id=result.task_id,
-                        subtask_id=subtask_id,
-                        content=result.full_content,
-                        offset=result.new_offset,
-                        thinking=result.thinking,
-                    )
-            except Exception as e:
-                logger.debug(f"[Device WS] DingTalk progress send skipped: {e}")
-
-            # Send streaming progress to Telegram if callback info exists
-            try:
-                from app.services.channels.telegram.callback import (
-                    telegram_callback_service,
-                )
-
-                if result.full_content or result.thinking:
-                    await telegram_callback_service.send_progress(
-                        task_id=result.task_id,
-                        subtask_id=subtask_id,
-                        content=result.full_content,
-                        offset=result.new_offset,
-                        thinking=result.thinking,
-                    )
-            except Exception as e:
-                logger.debug(f"[Device WS] Telegram progress send skipped: {e}")
+        if not task_id or not subtask_id:
+            return {"error": "Missing task_id or subtask_id"}
 
         logger.debug(
-            f"[Device WS] Progress received: subtask={subtask_id}, progress={data.get('progress', 0)}"
+            f"[Device WS] Responses API event: type={event_type}, "
+            f"task_id={task_id}, subtask_id={subtask_id}"
         )
 
-        # If status is COMPLETED, delegate to on_task_complete
-        if result.is_completed:
-            logger.info(
-                f"[Device WS] Progress event with COMPLETED status, treating as completion: subtask={subtask_id}"
-            )
-            return await self.on_task_complete(sid, data)
+        # Get lock for this subtask to ensure events are processed in order
+        # This prevents race conditions when multiple events arrive concurrently
+        lock = self._get_subtask_lock(subtask_id)
 
-        return {"success": True}
+        # Track whether this is a terminal event for lock cleanup
+        is_terminal = False
 
-    async def on_task_complete(self, sid: str, data: dict) -> dict:
-        """
-        Handle task:complete event from device.
-
-        Marks subtask as completed/failed and emits chat:done event.
-        Also sends result to DingTalk if the task was initiated from DingTalk.
-
-        Args:
-            sid: Socket ID
-            data: {"subtask_id": int, "status": str, "progress": int, "result": dict, "error_message": str?}
-
-        Returns:
-            {"success": True} or {"error": str}
-        """
-        session = await self.get_session(sid)
-        user_id = session.get("user_id")
-        device_id = session.get("device_id")
-
-        if not user_id or not device_id:
-            return {"error": "Not authenticated or not registered"}
-
-        subtask_id = data.get("subtask_id")
-        if not subtask_id:
-            return {"error": "Missing subtask_id"}
-
-        # Database operation: quick in, quick out
-        result = _update_subtask_complete(subtask_id, device_id, user_id, data)
-
-        if not result.success:
-            return {"error": result.error}
-
-        # WebSocket emission happens AFTER database connection is released
-        ws_emitter = get_ws_emitter()
-        if ws_emitter:
-            if result.status == "FAILED":
-                await ws_emitter.emit_chat_error(
-                    task_id=result.task_id,
+        try:
+            # Acquire lock to ensure sequential processing of events for this subtask
+            async with lock:
+                # Parse using shared ResponsesAPIEventParser
+                event = self._event_parser.parse(
+                    task_id=task_id,
                     subtask_id=subtask_id,
-                    error=result.error_message or "Task failed",
-                    message_id=result.message_id,
+                    message_id=message_id,
+                    event_type=event_type,
+                    data=event_data,
                 )
+
+                if event is None:
+                    # Lifecycle events (response.created, etc.) are skipped
+                    return {"success": True}
+
+                # Emit via StatusUpdatingEmitter -> WebSocketResultEmitter
+                # Pass user_id for task:status notification
+                ws_emitter = WebSocketResultEmitter(
+                    task_id=task_id,
+                    subtask_id=subtask_id,
+                    user_id=user_id,
+                )
+                emitter = StatusUpdatingEmitter(
+                    wrapped=ws_emitter,
+                    task_id=task_id,
+                    subtask_id=subtask_id,
+                )
+                await emitter.emit(event)
+                await emitter.close()
+
+                # Handle terminal events
+                is_terminal = event.type in (
+                    EventType.DONE.value,
+                    EventType.ERROR.value,
+                    EventType.CANCELLED.value,
+                )
+                if is_terminal:
+                    await self._publish_task_completed_event(
+                        task_id, subtask_id, user_id, device_id, event
+                    )
+
+            # Clean up lock after terminal event (outside the lock context)
+            if is_terminal:
+                self._cleanup_subtask_lock(subtask_id)
+
+            return {"success": True}
+
+        except Exception as e:
+            logger.exception(
+                f"[Device WS] Error handling Responses API event: "
+                f"type={event_type}, subtask_id={subtask_id}, error={e}"
+            )
+            # Clean up lock on error to prevent memory leak
+            self._cleanup_subtask_lock(subtask_id)
+            return {"error": str(e)}
+
+    async def _publish_task_completed_event(
+        self,
+        task_id: int,
+        subtask_id: int,
+        user_id: int,
+        device_id: str,
+        event: Any,
+    ) -> None:
+        """Publish TaskCompletedEvent and broadcast slot update for terminal events."""
+        try:
+            if event.type == EventType.DONE.value:
+                status = "COMPLETED"
+                result = event.result if hasattr(event, "result") else None
+                error = None
+            elif event.type == EventType.ERROR.value:
+                status = "FAILED"
+                result = None
+                error = event.error if hasattr(event, "error") else "Unknown error"
             else:
-                await ws_emitter.emit_chat_done(
-                    task_id=result.task_id,
+                status = "CANCELLED"
+                result = None
+                error = None
+
+            event_bus = get_event_bus()
+            await event_bus.publish(
+                TaskCompletedEvent(
+                    task_id=task_id,
                     subtask_id=subtask_id,
-                    offset=len(result.content),
-                    result={
-                        "value": result.content,
-                        "thinking": result.thinking,
-                        "workbench": result.workbench,
-                    },
-                    message_id=result.message_id,
+                    user_id=user_id,
+                    status=status,
+                    result=result,
+                    error=error,
                 )
-
-            # Emit task:status to user room to notify frontend of task completion
-            await ws_emitter.emit_task_status(
-                user_id=user_id,
-                task_id=result.task_id,
-                status=result.status,
-                progress=100,
             )
 
-        # Send result to DingTalk if the task was initiated from DingTalk
-        try:
-            from app.services.channels.dingtalk.callback import (
-                dingtalk_callback_service,
+            logger.info(
+                f"[Device WS] Published TaskCompletedEvent: "
+                f"task_id={task_id}, subtask_id={subtask_id}, status={status}"
             )
 
-            await dingtalk_callback_service.send_task_result(
-                task_id=result.task_id,
-                subtask_id=subtask_id,
-                content=result.content,
-                status=result.status,
-                error_message=result.error_message,
-            )
+            # Broadcast slot update after task completion
+            await self._broadcast_device_slot_update(user_id, device_id)
+
         except Exception as e:
-            logger.warning(f"[Device WS] Failed to send DingTalk callback: {e}")
-
-        # Send result to Telegram if the task was initiated from Telegram
-        try:
-            from app.services.channels.telegram.callback import (
-                telegram_callback_service,
+            logger.error(
+                f"[Device WS] Failed to publish TaskCompletedEvent: {e}",
+                exc_info=True,
             )
-
-            await telegram_callback_service.send_task_result(
-                task_id=result.task_id,
-                subtask_id=subtask_id,
-                content=result.content,
-                status=result.status,
-                error_message=result.error_message,
-            )
-        except Exception as e:
-            logger.warning(f"[Device WS] Failed to send Telegram callback: {e}")
-
-        logger.info(
-            f"[Device WS] Task complete: subtask={subtask_id}, status={result.status}"
-        )
-
-        # Broadcast slot update after task completion
-        await self._broadcast_device_slot_update(user_id, device_id)
-
-        return {"success": True}
 
     # ============================================================
     # Broadcast Helpers

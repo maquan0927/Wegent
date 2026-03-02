@@ -13,10 +13,22 @@ import json
 import os
 import stat
 import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from shared.models.execution import ExecutionRequest
+
+
+def create_mock_emitter():
+    """Create a mock emitter for testing."""
+    emitter = MagicMock()
+    emitter.in_progress = AsyncMock()
+    emitter.start = AsyncMock()
+    emitter.done = AsyncMock()
+    emitter.error = AsyncMock()
+    emitter.text_delta = AsyncMock()
+    return emitter
 
 
 class TestSaveClaudeConfigFiles:
@@ -25,14 +37,14 @@ class TestSaveClaudeConfigFiles:
     @pytest.fixture
     def task_data(self):
         """Sample task data for testing."""
-        return {
-            "task_id": 12345,
-            "subtask_id": 67890,
-            "task_title": "Test Task",
-            "subtask_title": "Test Subtask",
-            "user": {"user_name": "testuser"},
-            "bot": [{"api_key": "test_api_key", "model": "claude-3-5-sonnet-20241022"}],
-        }
+        return ExecutionRequest(
+            task_id=12345,
+            subtask_id=67890,
+            task_title="Test Task",
+            subtask_title="Test Subtask",
+            user={"user_name": "testuser"},
+            bot=[{"api_key": "test_api_key", "model": "claude-3-5-sonnet-20241022"}],
+        )
 
     @pytest.fixture
     def agent_config_with_sensitive_data(self):
@@ -57,7 +69,8 @@ class TestSaveClaudeConfigFiles:
         """Create ClaudeCodeAgent instance with mocked dependencies."""
         from executor.agents.claude_code.claude_code_agent import ClaudeCodeAgent
 
-        return ClaudeCodeAgent(task_data)
+        mock_emitter = create_mock_emitter()
+        return ClaudeCodeAgent(task_data, mock_emitter)
 
     def test_local_mode_does_not_write_settings_json(
         self, task_data, agent_config_with_sensitive_data, temp_workspace
@@ -79,7 +92,7 @@ class TestSaveClaudeConfigFiles:
 
             # Verify settings.json was NOT created
             settings_path = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude", "settings.json"
+                temp_workspace, str(task_data.task_id), ".claude", "settings.json"
             )
             assert not os.path.exists(
                 settings_path
@@ -105,7 +118,7 @@ class TestSaveClaudeConfigFiles:
 
             # Verify claude.json was created
             claude_json_path = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude", "claude.json"
+                temp_workspace, str(task_data.task_id), ".claude", "claude.json"
             )
             assert os.path.exists(
                 claude_json_path
@@ -167,7 +180,7 @@ class TestSaveClaudeConfigFiles:
             agent._save_claude_config_files(agent_config_with_sensitive_data)
 
             config_dir = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude"
+                temp_workspace, str(task_data.task_id), ".claude"
             )
             dir_stat = os.stat(config_dir)
             dir_mode = stat.S_IMODE(dir_stat.st_mode)
@@ -195,7 +208,7 @@ class TestSaveClaudeConfigFiles:
             agent._save_claude_config_files(agent_config_with_sensitive_data)
 
             claude_json_path = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude", "claude.json"
+                temp_workspace, str(task_data.task_id), ".claude", "claude.json"
             )
             file_stat = os.stat(claude_json_path)
             file_mode = stat.S_IMODE(file_stat.st_mode)
@@ -289,7 +302,7 @@ class TestSaveClaudeConfigFiles:
 
             # Walk through all created files
             config_dir = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude"
+                temp_workspace, str(task_data.task_id), ".claude"
             )
 
             for root, dirs, files in os.walk(config_dir):
@@ -322,14 +335,14 @@ class TestCreateAndConnectClientEnvPassing:
     @pytest.fixture
     def task_data(self):
         """Sample task data for testing."""
-        return {
-            "task_id": 12345,
-            "subtask_id": 67890,
-            "task_title": "Test Task",
-            "subtask_title": "Test Subtask",
-            "user": {"user_name": "testuser"},
-            "bot": [{"api_key": "test_api_key", "model": "claude-3-5-sonnet-20241022"}],
-        }
+        return ExecutionRequest(
+            task_id=12345,
+            subtask_id=67890,
+            task_title="Test Task",
+            subtask_title="Test Subtask",
+            user={"user_name": "testuser"},
+            bot=[{"api_key": "test_api_key", "model": "claude-3-5-sonnet-20241022"}],
+        )
 
     @pytest.fixture
     def temp_workspace(self):
@@ -352,11 +365,12 @@ class TestCreateAndConnectClientEnvPassing:
                 "executor.config.config.get_workspace_root", return_value=temp_workspace
             ),
         ):
-            agent = ClaudeCodeAgent(task_data)
+            mock_emitter = create_mock_emitter()
+            agent = ClaudeCodeAgent(task_data, mock_emitter)
 
             # Simulate what _save_claude_config_files does
             agent._claude_config_dir = os.path.join(
-                temp_workspace, str(task_data["task_id"]), ".claude"
+                temp_workspace, str(task_data.task_id), ".claude"
             )
             agent._claude_env_config = {
                 "ANTHROPIC_AUTH_TOKEN": "sk-ant-api-test-key",

@@ -9,7 +9,6 @@
 import asyncio
 import os
 import time
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -17,7 +16,6 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from executor.agents.agno.thinking_step_manager import ThinkingStepManager
 from executor.agents.base import Agent
 from executor.agents.claude_code.attachment_handler import (
-    AttachmentProcessResult,
     download_attachments,
     get_attachment_thinking_step_details,
 )
@@ -27,7 +25,6 @@ from executor.agents.claude_code.config_manager import (
     create_claude_model_config,
     extract_claude_options,
     get_claude_config_dir,
-    resolve_env_value,
 )
 from executor.agents.claude_code.git_operations import (
     add_to_git_exclude,
@@ -44,7 +41,6 @@ from executor.agents.claude_code.response_processor import (
 )
 from executor.agents.claude_code.session_manager import (
     SessionManager,
-    build_internal_session_key,
     resolve_session_id,
 )
 from executor.agents.claude_code.skill_deployer import (
@@ -54,14 +50,14 @@ from executor.agents.claude_code.skill_deployer import (
     setup_coordinate_mode,
 )
 from executor.config import config
-from executor.services.attachment_downloader import get_api_base_url
 from executor.tasks.resource_manager import ResourceManager
 from executor.tasks.task_state_manager import TaskState, TaskStateManager
 from shared.logger import setup_logger
+from shared.models.execution import ExecutionRequest
+from shared.models.responses_api_emitter import ResponsesAPIEmitter
 from shared.models.task import ExecutionResult, ThinkingStep
 from shared.status import TaskStatus
 from shared.telemetry.decorators import add_span_event, trace_async
-from shared.utils.sensitive_data_masker import mask_sensitive_data
 
 logger = setup_logger("claude_code_agent")
 
@@ -111,20 +107,25 @@ class ClaudeCodeAgent(Agent):
         """
         return SessionManager.get_active_session_count()
 
-    def __init__(self, task_data: Dict[str, Any]):
+    def __init__(
+        self,
+        task_data: ExecutionRequest,
+        emitter: ResponsesAPIEmitter,
+    ):
         """
         Initialize the Claude Code Agent
 
         Args:
-            task_data: The task data dictionary
+            task_data: The task data object
+            emitter: Emitter instance for sending events. Required parameter.
         """
-        super().__init__(task_data)
+        super().__init__(task_data, emitter)
         self.client = None
-        self.new_session = task_data.get("new_session", False)
+        self.new_session = task_data.new_session
 
         # Extract bot_id from task_data for session key
         bot_id = None
-        bots = task_data.get("bot", [])
+        bots = task_data.bot
         if bots and len(bots) > 0:
             bot_id = bots[0].get("id")
 
@@ -137,7 +138,7 @@ class ClaudeCodeAgent(Agent):
             self.task_id, bot_id, self.new_session, self.task_state_manager
         )
 
-        self.prompt = task_data.get("prompt", "")
+        self.prompt = task_data.prompt or ""
         self.project_path = None
 
         # Load hooks on first initialization
@@ -176,6 +177,9 @@ class ClaudeCodeAgent(Agent):
 
         # Initialize execution mode strategy
         self._mode_strategy: ExecutionModeStrategy = ModeStrategyFactory.create()
+
+        # Note: emitter is created in base class Agent.__init__()
+        # using EmitterBuilder with CallbackTransport
 
     def add_thinking_step(
         self,
@@ -323,10 +327,12 @@ class ClaudeCodeAgent(Agent):
             )
 
             # Check if bot config is available
-            if "bot" in self.task_data and len(self.task_data["bot"]) > 0:
-                bot_config = self.task_data["bot"][0]
-                user_name = self.task_data.get("user", {}).get("name", "unknown")
-                git_url = self.task_data.get("git_url", "")
+            bots = self.task_data.bot
+            if bots and len(bots) > 0:
+                bot_config = bots[0]
+                user = self.task_data.user if self.task_data.user else {}
+                user_name = user.get("user_name") or user.get("name") or "unknown"
+                git_url = self.task_data.git_url or ""
                 # Get config from bot using config_manager
                 agent_config = create_claude_model_config(
                     bot_config, user_name=user_name, git_url=git_url
@@ -380,7 +386,7 @@ class ClaudeCodeAgent(Agent):
         self._claude_config_dir = config_dir
         self._claude_env_config = env_config
 
-    def pre_execute(self) -> TaskStatus:
+    async def pre_execute(self) -> TaskStatus:
         """
         Pre-execution setup for Claude Code Agent
 
@@ -388,10 +394,10 @@ class ClaudeCodeAgent(Agent):
             TaskStatus: Pre-execution status
         """
         try:
-            git_url = self.task_data.get("git_url")
+            git_url = self.task_data.git_url
             # Download code if git_url is provided
             if git_url and git_url != "":
-                self.download_code()
+                await self.download_code()
 
                 # Update cwd in options if not already set
                 if (
@@ -441,6 +447,7 @@ class ClaudeCodeAgent(Agent):
             )
             return TaskStatus.FAILED
 
+
     def execute(self) -> TaskStatus:
         """
         Execute the Claude Code Agent task
@@ -465,7 +472,7 @@ class ClaudeCodeAgent(Agent):
 
             # Check if this is a subscription task - subscription tasks need to wait for completion
             # so the container can exit properly after task finishes
-            is_subscription = self.task_data.get("is_subscription", False)
+            is_subscription = self.task_data.is_subscription
 
             # Check if currently running in coroutine
             try:
@@ -648,7 +655,7 @@ class ClaudeCodeAgent(Agent):
 
             # Prepare prompt with skill emphasis if user selected skills
             prompt = self.prompt
-            user_selected_skills = self.task_data.get("user_selected_skills", [])
+            user_selected_skills = self.task_data.user_selected_skills
             if user_selected_skills:
                 skill_emphasis = self._build_skill_emphasis_prompt(user_selected_skills)
                 prompt = skill_emphasis + "\n\n" + prompt
@@ -660,7 +667,7 @@ class ClaudeCodeAgent(Agent):
                 prompt = (
                     prompt + "\nCurrent working directory: " + self.options.get("cwd")
                 )
-                git_url = self.task_data.get("git_url")
+                git_url = self.task_data.git_url
                 if git_url:
                     prompt = prompt + "\n project url:" + git_url
 
@@ -709,6 +716,7 @@ class ClaudeCodeAgent(Agent):
             result = await process_response(
                 self.client,
                 self.state_manager,
+                self.get_emitter(),
                 self.thinking_manager,
                 self.task_state_manager,
                 session_id=self.session_id,
@@ -728,6 +736,12 @@ class ClaudeCodeAgent(Agent):
                 self.task_state_manager.set_state(self.task_id, TaskState.FAILED)
             elif result == TaskStatus.CANCELLED:
                 self.task_state_manager.set_state(self.task_id, TaskState.CANCELLED)
+
+            # Auto-close CC process after completion to free device slot.
+            # Session ID is preserved on disk for resume on next message.
+            # Skip for CANCELLED — cancel/interrupt flow has its own cleanup.
+            if result in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                await self._auto_close_session()
 
             return result
 
@@ -803,7 +817,10 @@ class ClaudeCodeAgent(Agent):
                 if asyncio.iscoroutinefunction(self.on_client_created_callback):
                     await self.on_client_created_callback()
                 else:
-                    self.on_client_created_callback()
+                    # Handle case where callback is a lambda that returns a coroutine
+                    result = self.on_client_created_callback()
+                    if asyncio.iscoroutine(result):
+                        await result
             except Exception as e:
                 logger.warning(f"Error in on_client_created_callback: {e}")
 
@@ -841,6 +858,65 @@ class ClaudeCodeAgent(Agent):
         except Exception as e:
             logger.warning(f"Error closing client for retry: {e}")
             # Clear client reference anyway to allow new client creation
+            self.client = None
+
+    async def _auto_close_session(self) -> None:
+        """
+        Auto-close the CC process after message completion (local mode only).
+
+        Terminates the CC process and removes all in-memory tracking, but
+        preserves the on-disk session ID file so the next message can resume.
+        This frees the device slot immediately instead of keeping the process
+        alive between messages.
+        """
+        if config.EXECUTOR_MODE != "local":
+            return
+
+        if self.client is None:
+            logger.debug("No client to auto-close")
+            return
+
+        try:
+            logger.info(
+                f"Auto-closing CC session after completion: "
+                f"session_id={self.session_id}, task_id={self.task_id}"
+            )
+
+            # Terminate the CC process
+            await SessionManager._terminate_client_process(
+                self.client, self.session_id
+            )
+
+            # Remove all in-memory tracking (client cache + session_id_map)
+            # but preserve the on-disk .claude_session_id file for resume
+            internal_key = getattr(self, "_internal_session_key", None)
+            SessionManager.cleanup_session_tracking(
+                self.session_id, internal_key
+            )
+
+            # Clear local client reference
+            self.client = None
+
+            # Trigger heartbeat callback to immediately update slot usage
+            if self.on_client_created_callback:
+                try:
+                    if asyncio.iscoroutinefunction(self.on_client_created_callback):
+                        await self.on_client_created_callback()
+                    else:
+                        result = self.on_client_created_callback()
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception as e:
+                    logger.warning(
+                        f"Error in heartbeat callback after auto-close: {e}"
+                    )
+
+            logger.info(
+                f"Auto-closed CC session: session_id={self.session_id}, "
+                f"task_id={self.task_id}. Session ID preserved on disk for resume."
+            )
+        except Exception as e:
+            logger.warning(f"Error auto-closing CC session: {e}")
             self.client = None
 
     def _handle_execution_result(
@@ -881,7 +957,7 @@ class ClaudeCodeAgent(Agent):
                 result=ExecutionResult(
                     value=result_content,
                     thinking=self.thinking_manager.get_thinking_steps(),
-                ).dict(),
+                ).model_dump(),
             )
             return TaskStatus.COMPLETED
         else:
@@ -898,7 +974,7 @@ class ClaudeCodeAgent(Agent):
                 f"${{thinking.failed_no_content}} {execution_type}",
                 result=ExecutionResult(
                     thinking=self.thinking_manager.get_thinking_steps()
-                ).dict(),
+                ).model_dump(),
             )
             return TaskStatus.FAILED
 
@@ -931,7 +1007,7 @@ class ClaudeCodeAgent(Agent):
             f"${{thinking.execution_failed}} {execution_type}: {error_message}",
             result=ExecutionResult(
                 thinking=self.thinking_manager.get_thinking_steps()
-            ).dict(),
+            ).model_dump(),
         )
         return TaskStatus.FAILED
 

@@ -9,9 +9,10 @@
  * in the chat input area.
  *
  * Shows all devices (including offline) with visual status indicators.
- * Supports default device marking.
+ * Supports default device marking and device type filtering.
  */
 
+import { useMemo } from 'react'
 import { useDevices } from '@/contexts/DeviceContext'
 import { useTranslation } from '@/hooks/useTranslation'
 import { cn } from '@/lib/utils'
@@ -27,21 +28,40 @@ import {
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
+// Device type constants matching backend DeviceType enum
+const DEVICE_TYPE = {
+  LOCAL: 'local',
+  CLOUD: 'cloud',
+} as const
+
+type DeviceTypeValue = (typeof DEVICE_TYPE)[keyof typeof DEVICE_TYPE]
+
 interface DeviceSelectorProps {
   /** Additional className */
   className?: string
   /** Disabled state */
   disabled?: boolean
+  /** Filter devices by type (optional, shows all types if not specified) */
+  filterType?: DeviceTypeValue
 }
 
-export function DeviceSelector({ className, disabled }: DeviceSelectorProps) {
+export function DeviceSelector({ className, disabled, filterType }: DeviceSelectorProps) {
   const { t } = useTranslation('devices')
   const { devices, selectedDeviceId, setSelectedDeviceId, setDefaultDevice, isLoading } =
     useDevices()
 
+  // Filter devices by type if filterType is specified
+  const filteredDevices = useMemo(() => {
+    if (!filterType) return devices
+    return devices.filter(d => {
+      const deviceType = (d as typeof d & { device_type?: string }).device_type || DEVICE_TYPE.LOCAL
+      return deviceType === filterType
+    })
+  }, [devices, filterType])
+
   // Group devices by online/offline
-  const onlineDevices = devices.filter(d => d.status !== 'offline')
-  const offlineDevices = devices.filter(d => d.status === 'offline')
+  const onlineDevices = filteredDevices.filter(d => d.status !== 'offline')
+  const offlineDevices = filteredDevices.filter(d => d.status === 'offline')
 
   // Get selected device info
   const selectedDevice = selectedDeviceId
@@ -74,7 +94,7 @@ export function DeviceSelector({ className, disabled }: DeviceSelectorProps) {
   }
 
   // Don't render if no devices available
-  if (devices.length === 0 && !isLoading) {
+  if (filteredDevices.length === 0 && !isLoading) {
     return null
   }
 
@@ -149,8 +169,7 @@ export function DeviceSelector({ className, disabled }: DeviceSelectorProps) {
                 {t('online_devices')}
               </DropdownMenuLabel>
               {onlineDevices.map(device => {
-                const isFull = device.slot_used >= device.slot_max
-                const isDisabled = device.status === 'busy' || isFull
+                const isDisabled = device.status === 'busy'
                 const isSelected = selectedDeviceId === device.device_id
 
                 return (
@@ -167,12 +186,12 @@ export function DeviceSelector({ className, disabled }: DeviceSelectorProps) {
                       >
                         <Monitor className="w-4 h-4" />
                         <span className="flex-1 truncate">{device.name}</span>
-                        {/* Slot usage indicator */}
-                        <span
-                          className={cn('text-xs', isFull ? 'text-red-500' : 'text-text-muted')}
-                        >
-                          {device.slot_used}/{device.slot_max}
-                        </span>
+                        {/* Processing indicator */}
+                        {device.slot_used > 0 && (
+                          <span className="text-xs text-text-muted">
+                            {device.slot_used}
+                          </span>
+                        )}
                         {device.is_default && (
                           <Star className="w-3 h-3 text-yellow-500 fill-yellow-500" />
                         )}
@@ -184,7 +203,7 @@ export function DeviceSelector({ className, disabled }: DeviceSelectorProps) {
                     </TooltipTrigger>
                     {isDisabled && (
                       <TooltipContent side="right">
-                        <p>{isFull ? t('slots_full_hint') : t('device_busy_hint')}</p>
+                        <p>{t('device_busy_hint')}</p>
                       </TooltipContent>
                     )}
                   </Tooltip>

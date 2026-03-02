@@ -2,19 +2,42 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Base executor class.
+
+Uses unified ExecutionRequest from shared.models.execution.
+"""
+
 import abc
 import logging
 from typing import Any, Dict, Optional, Union
+
+from shared.models.execution import ExecutionRequest
 
 logger = logging.getLogger(__name__)
 
 
 class Executor(abc.ABC):
+    """Abstract base class for executors.
+
+    Uses unified ExecutionRequest from shared.models.execution.
+    """
 
     @abc.abstractmethod
     def submit_executor(
-        self, task: Dict[str, Any], callback: Optional[callable] = None
+        self,
+        task: Union[Dict[str, Any], ExecutionRequest],
+        callback: Optional[callable] = None,
     ) -> Dict[str, Any]:
+        """Submit a task for execution.
+
+        Args:
+            task: Task data as dict or ExecutionRequest
+            callback: Optional callback function for status updates
+
+        Returns:
+            Dict with execution result
+        """
         pass
 
     @abc.abstractmethod
@@ -63,6 +86,50 @@ class Executor(abc.ABC):
                 - oom_killed (bool): Whether executor was killed due to OOM
                 - exit_code (int): Exit code (0 = success, 137 = SIGKILL, etc)
                 - error_msg (str): Error message if any
+        """
+        pass
+
+    @abc.abstractmethod
+    def create_instance(
+        self, task: Dict[str, Any], task_info: Dict[str, Any], executor_name: str
+    ) -> None:
+        """Create a new runtime instance (container/pod).
+
+        Args:
+            task: Task payload dictionary
+            task_info: Extracted task metadata
+            executor_name: Runtime instance name
+        """
+        pass
+
+    @abc.abstractmethod
+    def wait_instance_ready(self, executor_name: str) -> Dict[str, Any]:
+        """Wait until runtime instance is ready to accept task requests.
+
+        Args:
+            executor_name: Runtime instance name
+
+        Returns:
+            Ready metadata used for dispatch (e.g., host port, base URL)
+        """
+        pass
+
+    @abc.abstractmethod
+    def dispatch_task_to_instance(
+        self,
+        task: Dict[str, Any],
+        executor_name: str,
+        ready_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Dispatch task payload to a ready runtime instance.
+
+        Args:
+            task: Task payload dictionary
+            executor_name: Runtime instance name
+            ready_info: Metadata returned by wait_instance_ready()
+
+        Returns:
+            Dispatch result metadata
         """
         pass
 

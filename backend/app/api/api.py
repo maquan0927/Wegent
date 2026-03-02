@@ -11,6 +11,7 @@ from app.api.endpoints import (
     groups,
     health,
     knowledge,
+    mcp_providers,
     oidc,
     openapi_responses,
     pet,
@@ -33,7 +34,6 @@ from app.api.endpoints.adapter import (
     bots,
     chat,
     dify,
-    executors,
     models,
     retrievers,
     shells,
@@ -47,6 +47,7 @@ from app.api.endpoints.adapter import (
 )
 from app.api.endpoints.internal import bots_router as internal_bots_router
 from app.api.endpoints.internal import (
+    callback_router,
     chat_storage_router,
     rag_router,
     services_router,
@@ -103,7 +104,6 @@ api_router.include_router(
     attachments.router, prefix="/attachments", tags=["attachments"]
 )
 api_router.include_router(repository.router, prefix="/git", tags=["repository"])
-api_router.include_router(executors.router, prefix="/executors", tags=["executors"])
 api_router.include_router(quota.router, prefix="/quota", tags=["quota"])
 api_router.include_router(dify.router, prefix="/dify", tags=["dify"])
 api_router.include_router(retrievers.router, prefix="/retrievers", tags=["retrievers"])
@@ -136,6 +136,9 @@ api_router.include_router(
 api_router.include_router(share.router, prefix="/share", tags=["share"])
 api_router.include_router(tables.router, prefix="/tables", tags=["tables"])
 api_router.include_router(rag.router, prefix="/rag", tags=["rag"])
+api_router.include_router(
+    mcp_providers.router, prefix="/mcp-providers", tags=["mcp-providers"]
+)
 api_router.include_router(utils.router, prefix="/utils", tags=["utils"])
 api_router.include_router(
     web_scraper.router, prefix="/web-scraper", tags=["web-scraper"]
@@ -157,4 +160,7 @@ api_router.include_router(
 )
 api_router.include_router(
     subscriptions_router, prefix="/internal", tags=["internal-subscriptions"]
+)
+api_router.include_router(
+    callback_router, prefix="/internal", tags=["internal-callback"]
 )

@@ -21,7 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from chat_shell.core.config import settings
 from chat_shell.core.database import get_db_context
-from chat_shell.interface import ChatRequest
+from chat_shell.tools.builtin import PreviewSubscriptionTool
+from shared.models.execution import ExecutionRequest
 from shared.telemetry.decorators import add_span_event, trace_async
 
 logger = logging.getLogger(__name__)
@@ -35,12 +36,14 @@ class ChatContextResult:
         history: Chat history messages
         extra_tools: All tools including builtin tools (LoadSkillTool, WebSearchTool, etc.)
         system_prompt: System prompt (may be updated by KB tools)
+        kb_meta_prompt: Knowledge base meta prompt (dynamic, injected via dynamic_context)
         mcp_clients: MCP clients for cleanup
     """
 
     history: list = field(default_factory=list)
     extra_tools: list = field(default_factory=list)
     system_prompt: str = ""
+    kb_meta_prompt: str = ""
     mcp_clients: list = field(default_factory=list)
 
 
@@ -60,11 +63,11 @@ class ChatContext:
       all execute concurrently
     """
 
-    def __init__(self, request: ChatRequest):
+    def __init__(self, request: ExecutionRequest):
         """Initialize chat context.
 
         Args:
-            request: The chat request containing all configuration
+            request: The execution request containing all configuration
         """
         self._request = request
         self._mcp_clients: list = []
@@ -142,7 +145,7 @@ class ChatContext:
                 "parallel_tasks_completed",
                 {
                     "history_count": len(history),
-                    "kb_tools_count": len(kb_result[0]) if kb_result else 0,
+                    "kb_tools_count": len(kb_result.extra_tools),
                     "skill_tools_count": len(skill_tools),
                     "skill_mcp_clients_count": len(skill_mcp_clients),
                     "mcp_tools_count": len(mcp_result[0]) if mcp_result else 0,
@@ -175,9 +178,9 @@ class ChatContext:
 
             # Process KB tools result for system prompt
             system_prompt = self._request.system_prompt or ""
-            kb_tools, updated_system_prompt = kb_result
-            if kb_tools:
-                system_prompt = updated_system_prompt
+            if kb_result.extra_tools:
+                system_prompt = kb_result.enhanced_system_prompt
+            kb_meta_prompt = kb_result.kb_meta_prompt
 
             # Track MCP clients for cleanup (both from MCP servers and skills)
             _, mcp_clients = mcp_result
@@ -197,6 +200,7 @@ class ChatContext:
                 history=history,
                 extra_tools=extra_tools,
                 system_prompt=system_prompt,
+                kb_meta_prompt=kb_meta_prompt,
                 mcp_clients=all_mcp_clients,
             )
 
@@ -237,8 +241,14 @@ class ChatContext:
         from chat_shell.history import get_chat_history
 
         # Use user_message_id to exclude current user message (and all messages after it)
-        # Fall back to message_id if user_message_id is not provided
-        exclude_message_id = self._request.user_message_id or self._request.message_id
+        # If user_message_id is not provided, infer it from message_id:
+        # message_id is assistant_subtask.message_id, user message is message_id - 1
+        if self._request.user_message_id:
+            exclude_message_id = self._request.user_message_id
+        elif self._request.message_id and self._request.message_id > 1:
+            exclude_message_id = self._request.message_id - 1
+        else:
+            exclude_message_id = None
 
         # Get history_limit from request (used by subscription tasks)
         history_limit = getattr(self._request, "history_limit", None)
@@ -269,7 +279,7 @@ class ChatContext:
             "context.kb_ids_count": len(self._request.knowledge_base_ids or []),
         },
     )
-    async def _prepare_kb_tools(self, db: AsyncSession) -> tuple[list, str]:
+    async def _prepare_kb_tools(self, db: AsyncSession):
         """Prepare knowledge base tools asynchronously.
 
         In HTTP mode (when Backend calls chat_shell via HTTP), the system prompt
@@ -277,11 +287,16 @@ class ChatContext:
         checking for KB prompt markers to avoid duplicate KB prompts.
         """
         from chat_shell.tools.knowledge_factory import prepare_knowledge_base_tools
+        from shared.models.knowledge import KnowledgeBaseToolsResult
 
         base_system_prompt = self._request.system_prompt or ""
         if not self._request.knowledge_base_ids:
             add_span_event("no_kb_ids_skipped")
-            return [], base_system_prompt
+            return KnowledgeBaseToolsResult(
+                extra_tools=[],
+                enhanced_system_prompt=base_system_prompt,
+                kb_meta_prompt="",
+            )
 
         add_span_event(
             "preparing_kb_tools",
@@ -324,7 +339,7 @@ class ChatContext:
             skip_prompt_enhancement=skip_prompt_enhancement,
             user_name=self._request.user_name,
         )
-        add_span_event("kb_tools_prepared", {"tools_count": len(result[0])})
+        add_span_event("kb_tools_prepared", {"tools_count": len(result.extra_tools)})
         return result
 
     def _should_skip_kb_prompt_enhancement(self, system_prompt: str) -> bool:
@@ -399,7 +414,7 @@ class ChatContext:
             user_selected_skills=self._request.user_selected_skills,
             user_name=self._request.user_name,
             auth_token=self._request.auth_token,
-            task_data=self._request.task_data,
+            task_data=self._request,
         )
         add_span_event(
             "skill_tools_prepared",
@@ -437,7 +452,7 @@ class ChatContext:
             if auth:
                 server_config[server_name]["headers"] = auth
 
-            client = MCPClient(server_config, task_data=self._request.task_data)
+            client = MCPClient(server_config, task_data=self._request)
             await client.connect()
             if client.is_connected:
                 tools = client.get_tools()
@@ -480,6 +495,58 @@ class ChatContext:
             )
             return {"success": False, "client": None}
 
+    async def _connect_single_mcp_server_with_config(
+        self, server_name: str, server_config: dict
+    ) -> dict:
+        """Connect to a single MCP server with pre-built config.
+
+        This is a lighter version that accepts pre-built config for use in
+        parallel connection scenarios where fault isolation is needed.
+
+        Args:
+            server_name: Name of the MCP server
+            server_config: Config dict for the server (single-entry dict)
+
+        Returns:
+            Dict with success status, tools, client, and summary
+        """
+        from chat_shell.tools.mcp import MCPClient
+
+        try:
+            client = MCPClient(server_config, task_data=self._request)
+            await client.connect()
+            if client.is_connected:
+                tools = client.get_tools()
+                return {
+                    "success": True,
+                    "tools": tools,
+                    "client": client,
+                    "summary": f"{server_name}({len(tools)})",
+                }
+            else:
+                logger.warning(
+                    "[CHAT_CONTEXT] MCP server %s connected but not ready",
+                    server_name,
+                )
+                return {"success": False, "client": client}
+        except Exception as e:
+            error_msg = str(e)
+            if hasattr(e, "exceptions"):
+                for exc in e.exceptions:
+                    if hasattr(exc, "exceptions"):
+                        for sub_exc in exc.exceptions:
+                            error_msg = str(sub_exc)
+                            break
+                    else:
+                        error_msg = str(exc)
+                    break
+            logger.warning(
+                "[CHAT_CONTEXT] Failed to load MCP server %s: %s",
+                server_name,
+                error_msg,
+            )
+            return {"success": False, "client": None}
+
     @trace_async(
         span_name="chat_context.connect_mcp_servers",
         tracer_name="chat_shell.services",
@@ -488,12 +555,16 @@ class ChatContext:
         },
     )
     async def _connect_mcp_servers(self) -> tuple[list, list]:
-        """Connect to all MCP servers using a single MultiServerMCPClient.
+        """Connect to all MCP servers with individual fault isolation.
 
-        This approach leverages the SDK's internal parallelization via asyncio.gather
-        for optimal performance.
+        Each server is connected independently to prevent one failing server
+        from affecting others. This provides better resilience compared to
+        a single MultiServerMCPClient where shared connection issues can
+        cause total failure.
+
+        Memory impact: Minimal - only MCPClient instances for successfully
+        connected servers are retained (for cleanup purposes).
         """
-        from chat_shell.tools.mcp import MCPClient
 
         logger.info(
             "[CHAT_CONTEXT] _connect_mcp_servers called: task_id=%d, mcp_servers=%s",
@@ -516,76 +587,58 @@ class ChatContext:
             self._request.task_id,
         )
 
-        # Build unified config for all MCP servers
-        add_span_event("building_unified_mcp_config")
-        unified_config: dict = {}
-        for server in self._request.mcp_servers:
-            server_name = server.get("name", "server")
-            transport_type = server.get("type", "streamable-http")
-            server_url = server.get("url", "")
-            unified_config[server_name] = {
-                "type": transport_type,
-                "url": server_url,
-            }
-            auth = server.get("auth")
-            if auth:
-                unified_config[server_name]["headers"] = auth
-
-        add_span_event(
-            "unified_config_built",
-            {"server_names": list(unified_config.keys())},
-        )
-
-        # Use single MCPClient with all servers - SDK handles parallel internally
+        # Connect to each MCP server individually for fault isolation
+        # This prevents one failing server from affecting others
         mcp_tools = []
         mcp_clients = []
         mcp_summary = []
 
-        try:
-            client = MCPClient(unified_config, task_data=self._request.task_data)
-            add_span_event("mcp_client_created")
+        add_span_event("connecting_mcp_servers_individually")
 
-            await client.connect()
+        # Build individual server configs
+        server_configs = []
+        for server in self._request.mcp_servers:
+            server_name = server.get("name", "server")
+            transport_type = server.get("type", "streamable-http")
+            server_url = server.get("url", "")
+            config = {
+                server_name: {
+                    "type": transport_type,
+                    "url": server_url,
+                }
+            }
+            auth = server.get("auth")
+            if auth:
+                config[server_name]["headers"] = auth
+            server_configs.append((server_name, config))
 
-            if client.is_connected:
-                tools = client.get_tools()
-                mcp_tools.extend(tools)
-                mcp_clients.append(client)
-                mcp_summary = [f"{name}(*)" for name in unified_config.keys()]
-                add_span_event(
-                    "mcp_servers_connected",
-                    {
-                        "connected_count": len(unified_config),
-                        "total_tools": len(tools),
-                    },
-                )
-            else:
-                add_span_event("mcp_client_not_ready")
-                logger.warning(
-                    "[CHAT_CONTEXT] MCP client connected but not ready",
-                )
-                mcp_clients.append(client)
-        except Exception as e:
-            error_msg = str(e)
-            if hasattr(e, "exceptions"):
-                for exc in e.exceptions:
-                    if hasattr(exc, "exceptions"):
-                        for sub_exc in exc.exceptions:
-                            error_msg = str(sub_exc)
-                            break
-                    else:
-                        error_msg = str(exc)
-                    break
-            add_span_event(
-                "mcp_connection_failed",
-                {"error": error_msg},
-            )
-            logger.warning(
-                "[CHAT_CONTEXT] Failed to load MCP servers: %s",
-                error_msg,
-            )
+        # Connect to each server in parallel with individual error handling
+        results = await asyncio.gather(
+            *[
+                self._connect_single_mcp_server_with_config(name, config)
+                for name, config in server_configs
+            ],
+            return_exceptions=True,
+        )
+
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("[CHAT_CONTEXT] MCP server connection error: %s", result)
+                continue
+            if result.get("success"):
+                mcp_tools.extend(result["tools"])
+                if result.get("client"):
+                    mcp_clients.append(result["client"])
+                mcp_summary.append(result["summary"])
 
         if mcp_summary:
+            add_span_event(
+                "mcp_servers_connected",
+                {
+                    "connected_count": len(mcp_summary),
+                    "total_tools": len(mcp_tools),
+                },
+            )
             logger.info(
                 "[CHAT_CONTEXT] Connected %d MCP servers: %s (total %d tools)",
                 len(mcp_summary),
@@ -604,7 +657,7 @@ class ChatContext:
 
     def _build_extra_tools(
         self,
-        kb_result: tuple[list, str],
+        kb_result,
         skill_tools: list,
         mcp_result: tuple[list, list],
     ) -> list:
@@ -614,7 +667,7 @@ class ChatContext:
         KB tools, skill tools, and MCP tools.
 
         Args:
-            kb_result: Tuple of (kb_tools, updated_system_prompt)
+            kb_result: KnowledgeBaseToolsResult
             skill_tools: List of skill tools
             mcp_result: Tuple of (mcp_tools, mcp_clients)
 
@@ -708,7 +761,20 @@ class ChatContext:
             model_name=model_name,
             model_namespace=model_namespace,
         )
+
         extra_tools.append(create_subscription_tool)
+
+        preview_subscription_tool = PreviewSubscriptionTool(
+            user_id=self._request.user_id,
+            team_id=self._request.team_id,
+            team_name=self._request.team_name,
+            team_namespace=self._request.bot_namespace or "default",
+            timezone=self._request.timezone,
+            model_name=model_name,
+            model_namespace=model_namespace,
+        )
+
+        extra_tools.append(preview_subscription_tool)
         logger.debug(
             "[CHAT_CONTEXT] Added CreateSubscriptionTool: team_id=%d, team_name=%s, "
             "model_name=%s, model_namespace=%s, backend_url=%s",
@@ -732,9 +798,8 @@ class ChatContext:
         # === External Tools ===
 
         # Add KB tools
-        kb_tools, _ = kb_result
-        if kb_tools:
-            extra_tools.extend(kb_tools)
+        if kb_result.extra_tools:
+            extra_tools.extend(kb_result.extra_tools)
 
         # Add skill tools (dynamically created from skill configs)
         if skill_tools:

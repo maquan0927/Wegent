@@ -13,12 +13,24 @@ import { apiClient } from './client'
 
 export type DeviceStatus = 'online' | 'offline' | 'busy'
 
+// Device type enum matching backend DeviceType
+export type DeviceType = 'local' | 'cloud'
+
+// Device connection mode enum matching backend DeviceConnectionMode
+export type DeviceConnectionMode = 'websocket' // Future: 'api'
+
 export interface DeviceRunningTask {
   task_id: number
   subtask_id: number
   title: string
   status: string
   created_at?: string
+}
+
+export interface CloudDeviceConfig {
+  sandboxId: string
+  imageId: string
+  createdAt: string
 }
 
 export interface DeviceInfo {
@@ -28,6 +40,9 @@ export interface DeviceInfo {
   status: DeviceStatus
   is_default: boolean
   last_heartbeat?: string
+  // Device type and connection mode
+  device_type: DeviceType
+  connection_mode: DeviceConnectionMode
   capabilities?: string[]
   slot_used: number
   slot_max: number
@@ -36,6 +51,8 @@ export interface DeviceInfo {
   executor_version: string | null
   latest_version: string | null
   update_available: boolean
+  // Cloud device specific config
+  cloud_config?: CloudDeviceConfig
 }
 
 export interface DeviceListResponse {

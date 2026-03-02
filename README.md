@@ -23,9 +23,50 @@ English | [简体中文](README_zh.md)
 
 ---
 
+## 🏗️ Architecture Overview
+
+```mermaid
+graph TB
+    subgraph Access["Entry Layer"]
+        direction TB
+        Web["🌐 Web"]
+        IM["💬 IM Tools"]
+        API["🔌 API"]
+    end
+
+    subgraph Features["Feature Layer"]
+        direction TB
+        Chat["💬 Chat"]
+        Code["💻 Coding"]
+        Feed["📡 Feed"]
+        Knowledge["📚 Knowledge"]
+    end
+
+    subgraph Agents["Agent Layer"]
+        direction TB
+        ChatShell["🗣️ Wegent Chat"]
+        ClaudeCode["🧠 Claude Code"]
+        Agno["🤝 Agno"]
+        Dify["✨ Dify"]
+    end
+
+    subgraph Execution["Execution Environment"]
+        direction TB
+        Docker["🐳 Agent Sandbox"]
+        Cloud["☁️ Cloud Device"]
+        Local["💻 Local Device"]
+    end
+
+    Access --> Features
+    Features --> Agents
+    Agents --> Execution
+```
+
+---
+
 ## ✨ Core Features
 
-### 💬 Cha Agent
+### 💬 Chat Agent
 <img src="https://github.com/user-attachments/assets/677abce3-bd3f-4064-bdab-e247b142c22f" width="100%" alt="Chat Mode Demo"/>
 A fully open-source chat agent with powerful capabilities:
 
@@ -82,6 +123,13 @@ Run AI tasks on your local machine with full control:
 - **Default Device**: Set a preferred device for quick task execution
 - **Secure Connection**: Connect to Wegent backend via authenticated WebSocket
 
+### 💬 IM Integration
+
+Integrate AI agents into your favorite IM tools:
+
+- **DingTalk Bot**: Deploy agents as DingTalk bots for team collaboration
+- **Telegram Bot**: Connect agents to Telegram for personal or group chats
+
 ### 🔧 Customization
 
 All features above are fully customizable:
@@ -105,6 +153,8 @@ All features above are fully customizable:
 
 ## 🚀 Quick Start
 
+### Method 1: Quick Install (Recommended)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wecode-ai/Wegent/main/install.sh | bash
 ```
@@ -112,6 +162,73 @@ curl -fsSL https://raw.githubusercontent.com/wecode-ai/Wegent/main/install.sh | 
 Then open http://localhost:3000 in your browser.
 
 > Optional: Enable RAG features with `docker compose --profile rag up -d`
+
+### Method 2: Source Installation
+
+If you have cloned the source code, you can run the install script directly. It will automatically detect the source environment and build images from local source:
+
+```bash
+git clone https://github.com/wecode-ai/Wegent.git
+cd Wegent
+./install.sh
+```
+
+Or manually specify to use local build in the source directory:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+```
+
+**Common commands (source mode):**
+```bash
+# View logs
+docker compose -f docker-compose.yml -f docker-compose.build.yml logs -f
+
+# Stop services
+docker compose -f docker-compose.yml -f docker-compose.build.yml down
+
+# Start services
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+
+# Rebuild images
+docker compose -f docker-compose.yml -f docker-compose.build.yml build --no-cache
+```
+
+### Method 3: Local Development Mode
+
+If you are a developer and want fast debugging with hot reload, use local development mode:
+
+```bash
+git clone https://github.com/wecode-ai/Wegent.git
+cd Wegent
+./start.sh
+```
+
+**Local development mode features:**
+- Run services directly without Docker
+- Automatic hot reload on code changes
+- Ideal for daily development and debugging
+
+**Common commands (local dev mode):**
+```bash
+# Start services
+./start.sh
+
+# Stop services
+./start.sh --stop
+
+# Restart services
+./start.sh --restart
+
+# Check status
+./start.sh --status
+
+# Initialize configuration
+./start.sh --init
+
+# Show help
+./start.sh --help
+```
 
 ---
 
@@ -123,20 +240,6 @@ Then open http://localhost:3000 in your browser.
 | translator | Multi-language translation |
 | dev-team | Git workflow: branch → code → commit → PR |
 | wiki-team | Codebase Wiki documentation generation |
-
----
-
-## 🏗️ Architecture
-
-```
-Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (ClaudeCode/Agno/Dify/Chat)
-```
-
-**Core Concepts:**
-- **Ghost** (prompt) + **Shell** (environment) + **Model** = **Bot**
-- Multiple **Bots** + **Collaboration Mode** = **Team**
-
-> See [Core Concepts](https://wecode-ai.github.io/wegent-docs/en/concepts/core-concepts) | [YAML Spec](https://wecode-ai.github.io/wegent-docs/en/reference/yaml-specification)
 
 ---
 
@@ -185,13 +288,6 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/johnny0120">
-            <img src="https://avatars.githubusercontent.com/u/15564476?v=4" width="80;" alt="johnny0120"/>
-            <br />
-            <sub><b>Johnny0120</b></sub>
-        </a>
-    </td>
-    <td align="center">
         <a href="https://github.com/FicoHu">
             <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
             <br />
@@ -199,10 +295,10 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/kissghosts">
-            <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
+        <a href="https://github.com/johnny0120">
+            <img src="https://avatars.githubusercontent.com/u/15564476?v=4" width="80;" alt="johnny0120"/>
             <br />
-            <sub><b>Yanhe</b></sub>
+            <sub><b>Johnny0120</b></sub>
         </a>
     </td>
     <td align="center">
@@ -210,6 +306,13 @@ Thanks to the following developers for their contributions and efforts to make t
             <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
             <br />
             <sub><b>Yi Xiang</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/kissghosts">
+            <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
+            <br />
+            <sub><b>Yanhe</b></sub>
         </a>
     </td></tr>
 <tr>
@@ -256,20 +359,27 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/kerwin612">
+            <img src="https://avatars.githubusercontent.com/u/3371163?v=4" width="80;" alt="kerwin612"/>
+            <br />
+            <sub><b>Kerwin Bryant</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/junbaor">
             <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
             <br />
             <sub><b>Junbaor</b></sub>
         </a>
-    </td>
+    </td></tr>
+<tr>
     <td align="center">
         <a href="https://github.com/fingki">
             <img src="https://avatars.githubusercontent.com/u/11422037?v=4" width="80;" alt="fingki"/>
             <br />
             <sub><b>Fingki</b></sub>
         </a>
-    </td></tr>
-<tr>
+    </td>
     <td align="center">
         <a href="https://github.com/fengkuizhi">
             <img src="https://avatars.githubusercontent.com/u/3616484?v=4" width="80;" alt="fengkuizhi"/>
@@ -306,6 +416,21 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/LiDaiyan">
+            <img src="https://avatars.githubusercontent.com/u/36092701?v=4" width="80;" alt="LiDaiyan"/>
+            <br />
+            <sub><b>Li Daiyan</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/RichardoMrMu">
+            <img src="https://avatars.githubusercontent.com/u/44485717?v=4" width="80;" alt="RichardoMrMu"/>
+            <br />
+            <sub><b>RichardoMu</b></sub>
+        </a>
+    </td></tr>
+<tr>
+    <td align="center">
         <a href="https://github.com/andrewzq777">
             <img src="https://avatars.githubusercontent.com/u/223815624?v=4" width="80;" alt="andrewzq777"/>
             <br />
@@ -317,6 +442,13 @@ Thanks to the following developers for their contributions and efforts to make t
             <img src="https://avatars.githubusercontent.com/u/3962041?v=4" width="80;" alt="graindt"/>
             <br />
             <sub><b>Graindt</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/qingchengliu">
+            <img src="https://avatars.githubusercontent.com/u/20255838?v=4" width="80;" alt="qingchengliu"/>
+            <br />
+            <sub><b>Qingcheng</b></sub>
         </a>
     </td>
     <td align="center">

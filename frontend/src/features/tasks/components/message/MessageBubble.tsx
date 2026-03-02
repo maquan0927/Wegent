@@ -81,6 +81,16 @@ export interface Message {
     reasoning_content?: string // Reasoning content from DeepSeek R1 etc.
     blocks?: MessageBlock[] // Message blocks for mixed rendering (new format)
     annotations?: GeminiAnnotation[] // Gemini Deep Research grounding annotations
+    /** Video generation progress (0-100) */
+    progress?: number
+    /** Video generation result */
+    video?: {
+      attachment_id?: number | null
+      video_url: string
+      thumbnail?: string | null // Base64 encoded thumbnail
+      duration?: number | null // Video duration in seconds
+      is_placeholder?: boolean // True when video is still being generated
+    }
   }
   /** @deprecated Use contexts instead */
   attachments?: Attachment[]
@@ -637,67 +647,70 @@ const MessageBubble = memo(
           </CollapsibleMessage>
           <SourceReferences sources={msg.sources || msg.result?.sources || []} />
           <GeminiAnnotations annotations={msg.result?.annotations || []} />
-          <BubbleTools
-            contentToCopy={`${promptPart ? promptPart + '\n\n' : ''}${normalizedResult}`}
-            onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
-            tools={[
-              {
-                key: 'download',
-                title: t('messages.download') || 'Download',
-                icon: <Download className="h-4 w-4 text-text-muted" />,
-                onClick: () => {
-                  const blob = new Blob([`${normalizedResult}`], {
-                    type: 'text/plain;charset=utf-8',
-                  })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = 'message.md'
-                  a.click()
-                  URL.revokeObjectURL(url)
-                  trace.download(msg.type, msg.subtaskId)
+          {/* Hide BubbleTools during streaming */}
+          {!isStreaming && (
+            <BubbleTools
+              contentToCopy={`${promptPart ? promptPart + '\n\n' : ''}${normalizedResult}`}
+              onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
+              tools={[
+                {
+                  key: 'download',
+                  title: t('messages.download') || 'Download',
+                  icon: <Download className="h-4 w-4 text-text-muted" />,
+                  onClick: () => {
+                    const blob = new Blob([`${normalizedResult}`], {
+                      type: 'text/plain;charset=utf-8',
+                    })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = 'message.md'
+                    a.click()
+                    URL.revokeObjectURL(url)
+                    trace.download(msg.type, msg.subtaskId)
+                  },
                 },
-              },
-            ]}
-            feedback={feedback}
-            onLike={handleLike}
-            onDislike={handleDislike}
-            feedbackLabels={{
-              like: t('chat:messages.like') || 'Like',
-              dislike: t('chat:messages.dislike') || 'Dislike',
-            }}
-            showRegenerate={(() => {
-              const hasOnRegenerate = Boolean(onRegenerate)
-              const isCompleted =
-                msg.subtaskStatus === 'COMPLETED' ||
-                msg.subtaskStatus === 'CANCELLED' ||
-                msg.status === 'completed'
-              const isNotRunning =
-                msg.subtaskStatus !== 'RUNNING' &&
-                msg.subtaskStatus !== 'PENDING' &&
-                msg.subtaskStatus !== 'PROCESSING' &&
-                msg.status !== 'streaming' &&
-                msg.status !== 'pending'
-              return (
-                hasOnRegenerate && !isGroupChat && isLastAiMessage && isCompleted && isNotRunning
-              )
-            })()}
-            onRegenerateClick={() => setIsRegeneratePopoverOpen(true)}
-            isRegenerating={isRegenerating}
-            renderRegenerateButton={(defaultButton, tooltipText) => (
-              <RegenerateModelPopover
-                open={isRegeneratePopoverOpen}
-                onOpenChange={setIsRegeneratePopoverOpen}
-                selectedTeam={selectedTeam ?? null}
-                onSelectModel={model => {
-                  onRegenerate?.(msg, model)
-                }}
-                isLoading={isRegenerating}
-                trigger={defaultButton}
-                tooltipText={tooltipText}
-              />
-            )}
-          />
+              ]}
+              feedback={feedback}
+              onLike={handleLike}
+              onDislike={handleDislike}
+              feedbackLabels={{
+                like: t('chat:messages.like') || 'Like',
+                dislike: t('chat:messages.dislike') || 'Dislike',
+              }}
+              showRegenerate={(() => {
+                const hasOnRegenerate = Boolean(onRegenerate)
+                const isCompleted =
+                  msg.subtaskStatus === 'COMPLETED' ||
+                  msg.subtaskStatus === 'CANCELLED' ||
+                  msg.status === 'completed'
+                const isNotRunning =
+                  msg.subtaskStatus !== 'RUNNING' &&
+                  msg.subtaskStatus !== 'PENDING' &&
+                  msg.subtaskStatus !== 'PROCESSING' &&
+                  msg.status !== 'streaming' &&
+                  msg.status !== 'pending'
+                return (
+                  hasOnRegenerate && !isGroupChat && isLastAiMessage && isCompleted && isNotRunning
+                )
+              })()}
+              onRegenerateClick={() => setIsRegeneratePopoverOpen(true)}
+              isRegenerating={isRegenerating}
+              renderRegenerateButton={(defaultButton, tooltipText) => (
+                <RegenerateModelPopover
+                  open={isRegeneratePopoverOpen}
+                  onOpenChange={setIsRegeneratePopoverOpen}
+                  selectedTeam={selectedTeam ?? null}
+                  onSelectModel={model => {
+                    onRegenerate?.(msg, model)
+                  }}
+                  isLoading={isRegenerating}
+                  trigger={defaultButton}
+                  tooltipText={tooltipText}
+                />
+              )}
+            />
+          )}
         </>
       )
     }
@@ -1119,6 +1132,10 @@ const MessageBubble = memo(
     const renderAiMessage = (message: Message, messageIndex: number) => {
       const content = message.content ?? ''
 
+      // Video rendering is now handled by MixedContentView via video blocks
+      // The old result.video and result.progress logic has been removed
+      // in favor of the unified block-based rendering system
+
       try {
         let contentToParse = content
 
@@ -1253,206 +1270,6 @@ const MessageBubble = memo(
       )
     }
 
-    // Render recovered content with typewriter effect (content is already processed by RecoveredMessageBubble)
-    // Also handles clarification form parsing for streaming content
-    const renderRecoveredContent = () => {
-      if (!msg.recoveredContent || msg.subtaskStatus !== 'RUNNING') return null
-
-      // Pre-process markdown to handle edge cases where ** is followed by punctuation
-      // Same fix as in renderMarkdownResult - convert all ** to <strong> tags
-      let contentToRender = msg.recoveredContent.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-
-      // Process [cite: X, Y, Z] patterns to clickable markdown links
-      const annotations = msg.result?.annotations
-      if (annotations && annotations.length > 0) {
-        contentToRender = processCitePatterns(contentToRender, annotations)
-      }
-
-      // Try to parse clarification format from recovered/streaming content
-      // This ensures clarification forms are rendered correctly during streaming
-      const markdownClarification = parseMarkdownClarification(contentToRender)
-      if (markdownClarification) {
-        const { data, prefixText, suffixText } = markdownClarification
-        return (
-          <div className="space-y-4">
-            {/* Render prefix text (content before the clarification form) */}
-            {prefixText && (
-              <EnhancedMarkdown
-                source={prefixText}
-                theme={theme}
-                components={{
-                  a: ({ href, children }) => {
-                    if (!href) {
-                      return <span>{children}</span>
-                    }
-                    return (
-                      <SmartLink href={href} disabled={isStreaming}>
-                        {children}
-                      </SmartLink>
-                    )
-                  },
-                  img: ({ src, alt }) => {
-                    if (!src || typeof src !== 'string') return null
-                    return <SmartImage src={src} alt={alt} />
-                  },
-                }}
-              />
-            )}
-            {/* Render the clarification form */}
-            <ClarificationForm
-              data={data}
-              taskId={selectedTaskDetail?.id || 0}
-              currentMessageIndex={index}
-              rawContent={contentToRender}
-              onSubmit={onSendMessage}
-            />
-            {/* Render suffix text (content after the clarification form that couldn't be parsed) */}
-            {suffixText && (
-              <div className="mt-4 p-3 rounded-lg border border-border bg-surface/50">
-                <EnhancedMarkdown
-                  source={suffixText}
-                  theme={theme}
-                  components={{
-                    a: ({ href, children }) => {
-                      if (!href) {
-                        return <span>{children}</span>
-                      }
-                      return (
-                        <SmartLink href={href} disabled={isStreaming}>
-                          {children}
-                        </SmartLink>
-                      )
-                    },
-                    img: ({ src, alt }) => {
-                      if (!src || typeof src !== 'string') return null
-                      return <SmartImage src={src} alt={alt} />
-                    },
-                  }}
-                />
-              </div>
-            )}
-            {/* Show copy and download buttons */}
-            <SourceReferences sources={msg.sources || msg.result?.sources || []} />
-            <GeminiAnnotations annotations={msg.result?.annotations || []} />
-            <BubbleTools
-              contentToCopy={contentToRender}
-              onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
-              tools={[
-                {
-                  key: 'download',
-                  title: t('messages.download') || 'Download',
-                  icon: <Download className="h-4 w-4 text-text-muted" />,
-                  onClick: () => {
-                    const blob = new Blob([contentToRender], {
-                      type: 'text/plain;charset=utf-8',
-                    })
-                    const url = URL.createObjectURL(blob)
-                    const a = document.createElement('a')
-                    a.href = url
-                    a.download = 'message.md'
-                    a.click()
-                    URL.revokeObjectURL(url)
-                    trace.download(msg.type, msg.subtaskId)
-                  },
-                },
-              ]}
-              feedback={feedback}
-              onLike={handleLike}
-              onDislike={handleDislike}
-              feedbackLabels={{
-                like: t('chat:messages.like') || 'Like',
-                dislike: t('chat:messages.dislike') || 'Dislike',
-              }}
-            />
-          </div>
-        )
-      }
-
-      // Try to parse final prompt format
-      const markdownFinalPrompt = parseMarkdownFinalPrompt(contentToRender)
-      if (markdownFinalPrompt) {
-        return (
-          <FinalPromptMessage
-            data={markdownFinalPrompt}
-            selectedTeam={selectedTeam}
-            selectedRepo={selectedRepo}
-            selectedBranch={selectedBranch}
-            taskId={selectedTaskDetail?.id}
-            isPendingConfirmation={isPendingConfirmation}
-            onStageConfirmed={onPipelineStageConfirmed}
-          />
-        )
-      }
-
-      // Default: render as markdown
-      return (
-        <div className="space-y-2">
-          {contentToRender ? (
-            <>
-              <EnhancedMarkdown
-                source={contentToRender}
-                theme={theme}
-                components={{
-                  a: ({ href, children }) => {
-                    if (!href) {
-                      return <span>{children}</span>
-                    }
-                    return (
-                      <SmartLink href={href} disabled={isStreaming}>
-                        {children}
-                      </SmartLink>
-                    )
-                  },
-                  img: ({ src, alt }) => {
-                    if (!src || typeof src !== 'string') return null
-                    return <SmartImage src={src} alt={alt} />
-                  },
-                }}
-              />
-              {/* Show copy and download buttons during streaming */}
-              <SourceReferences sources={msg.sources || msg.result?.sources || []} />
-              <GeminiAnnotations annotations={msg.result?.annotations || []} />
-              <BubbleTools
-                contentToCopy={contentToRender}
-                onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
-                tools={[
-                  {
-                    key: 'download',
-                    title: t('messages.download') || 'Download',
-                    icon: <Download className="h-4 w-4 text-text-muted" />,
-                    onClick: () => {
-                      const blob = new Blob([contentToRender], {
-                        type: 'text/plain;charset=utf-8',
-                      })
-                      const url = URL.createObjectURL(blob)
-                      const a = document.createElement('a')
-                      a.href = url
-                      a.download = 'message.md'
-                      a.click()
-                      URL.revokeObjectURL(url)
-                      trace.download(msg.type, msg.subtaskId)
-                    },
-                  },
-                ]}
-                feedback={feedback}
-                onLike={handleLike}
-                onDislike={handleDislike}
-                feedbackLabels={{
-                  like: t('chat:messages.like') || 'Like',
-                  dislike: t('chat:messages.dislike') || 'Dislike',
-                }}
-              />
-            </>
-          ) : (
-            <div className="flex items-center gap-2 text-text-muted">
-              <span className="animate-pulse">●</span>
-              <span className="text-sm">{t('messages.thinking') || 'Thinking...'}</span>
-            </div>
-          )}
-        </div>
-      )
-    }
-
     // Handle text selection in AI messages
     const handleTextSelection = () => {
       if (!onTextSelect || isUserTypeMessage) return
@@ -1527,8 +1344,37 @@ const MessageBubble = memo(
                 </div>
               )}
               {/* Show contexts (attachments, knowledge bases, etc.) for both user and AI messages */}
+              {/* For AI messages with image/video blocks, filter out attachments to avoid duplicate display */}
               <ContextBadgeList
-                contexts={msg.contexts || undefined}
+                contexts={(() => {
+                  if (!msg.contexts) return undefined
+                  // For AI messages, check if there are image/video blocks in result.blocks
+                  // If so, filter out attachments that are already displayed in ImageGallery/VideoPlayer
+                  if (!isUserTypeMessage && msg.result?.blocks) {
+                    // Get all attachment IDs from image and video blocks
+                    const attachmentIdsInBlocks = new Set<number>()
+                    for (const block of msg.result.blocks) {
+                      // Handle image blocks
+                      if (block.type === 'image' && block.image_attachment_ids) {
+                        for (const id of block.image_attachment_ids) {
+                          if (id) attachmentIdsInBlocks.add(id)
+                        }
+                      }
+                      // Handle video blocks
+                      if (block.type === 'video' && block.video_attachment_id) {
+                        attachmentIdsInBlocks.add(block.video_attachment_id)
+                      }
+                    }
+                    // If there are attachment IDs in blocks, filter them out from contexts
+                    if (attachmentIdsInBlocks.size > 0) {
+                      const filteredContexts = msg.contexts.filter(
+                        ctx => !attachmentIdsInBlocks.has(ctx.id)
+                      )
+                      return filteredContexts.length > 0 ? filteredContexts : undefined
+                    }
+                  }
+                  return msg.contexts
+                })()}
                 onContextReselect={isUserTypeMessage ? onContextReselect : undefined}
                 shareToken={shareToken}
               />
@@ -1544,94 +1390,95 @@ const MessageBubble = memo(
                 />
               ) : (
                 <>
-                  {/* Show recovered content if available, otherwise show normal content */}
-                  {msg.recoveredContent &&
-                  msg.subtaskStatus === 'RUNNING' &&
-                  !msg.result?.blocks ? (
-                    renderRecoveredContent()
-                  ) : !isUserTypeMessage &&
-                    msg.result?.blocks &&
-                    msg.result.blocks.length > 0 &&
-                    // IMPORTANT: If content contains clarification or final prompt format,
-                    // use renderMessageBody instead to properly render the interactive form.
-                    // hasSpecialFormat is a quick check using keyword detection.
-                    !hasSpecialFormat ? (
+                  {/* Unified rendering: Use MixedContentView for AI messages with blocks, otherwise renderMessageBody */}
+                  {/* MixedContentView handles both streaming and completed states, including tool blocks */}
+                  {!isUserTypeMessage &&
+                  msg.result?.blocks &&
+                  msg.result.blocks.length > 0 &&
+                  // IMPORTANT: If content contains clarification or final prompt format,
+                  // use renderMessageBody instead to properly render the interactive form.
+                  // hasSpecialFormat is a quick check using keyword detection.
+                  !hasSpecialFormat ? (
                     /* For AI messages with blocks data (without clarification), use mixed content view to interleave text and tools */
                     <>
                       <MixedContentView
                         thinking={msg.thinking ?? null}
-                        content={msg.content || ''}
+                        content={msg.recoveredContent || msg.content || ''}
                         taskStatus={msg.subtaskStatus}
                         theme={theme}
                         blocks={msg.result.blocks}
+                        annotations={msg.result?.annotations}
                       />
                       <SourceReferences sources={msg.sources || msg.result?.sources || []} />
                       <GeminiAnnotations annotations={msg.result?.annotations || []} />
-                      <BubbleTools
-                        contentToCopy={msg.content || ''}
-                        onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
-                        tools={[
-                          {
-                            key: 'download',
-                            title: t('messages.download') || 'Download',
-                            icon: <Download className="h-4 w-4 text-text-muted" />,
-                            onClick: () => {
-                              const blob = new Blob([msg.content || ''], {
-                                type: 'text/plain;charset=utf-8',
-                              })
-                              const url = URL.createObjectURL(blob)
-                              const a = document.createElement('a')
-                              a.href = url
-                              a.download = 'message.md'
-                              a.click()
-                              URL.revokeObjectURL(url)
-                              trace.download(msg.type, msg.subtaskId)
+                      {/* Hide BubbleTools during streaming */}
+                      {!isStreaming && (
+                        <BubbleTools
+                          contentToCopy={msg.content || ''}
+                          onCopySuccess={() => trace.copy(msg.type, msg.subtaskId)}
+                          tools={[
+                            {
+                              key: 'download',
+                              title: t('messages.download') || 'Download',
+                              icon: <Download className="h-4 w-4 text-text-muted" />,
+                              onClick: () => {
+                                const blob = new Blob([msg.content || ''], {
+                                  type: 'text/plain;charset=utf-8',
+                                })
+                                const url = URL.createObjectURL(blob)
+                                const a = document.createElement('a')
+                                a.href = url
+                                a.download = 'message.md'
+                                a.click()
+                                URL.revokeObjectURL(url)
+                                trace.download(msg.type, msg.subtaskId)
+                              },
                             },
-                          },
-                        ]}
-                        feedback={feedback}
-                        onLike={handleLike}
-                        onDislike={handleDislike}
-                        feedbackLabels={{
-                          like: t('chat:messages.like') || 'Like',
-                          dislike: t('chat:messages.dislike') || 'Dislike',
-                        }}
-                        showRegenerate={(() => {
-                          const hasOnRegenerate = Boolean(onRegenerate)
-                          const isCompleted =
-                            msg.subtaskStatus === 'COMPLETED' ||
-                            msg.subtaskStatus === 'CANCELLED' ||
-                            msg.status === 'completed'
-                          const isNotRunning =
-                            msg.subtaskStatus !== 'RUNNING' &&
-                            msg.subtaskStatus !== 'PENDING' &&
-                            msg.subtaskStatus !== 'PROCESSING' &&
-                            msg.status !== 'streaming' &&
-                            msg.status !== 'pending'
-                          return (
-                            hasOnRegenerate &&
-                            !isGroupChat &&
-                            isLastAiMessage &&
-                            isCompleted &&
-                            isNotRunning
-                          )
-                        })()}
-                        onRegenerateClick={() => setIsRegeneratePopoverOpen(true)}
-                        isRegenerating={isRegenerating}
-                        renderRegenerateButton={(defaultButton, tooltipText) => (
-                          <RegenerateModelPopover
-                            open={isRegeneratePopoverOpen}
-                            onOpenChange={setIsRegeneratePopoverOpen}
-                            selectedTeam={selectedTeam ?? null}
-                            onSelectModel={model => {
-                              onRegenerate?.(msg, model)
-                            }}
-                            isLoading={isRegenerating}
-                            trigger={defaultButton}
-                            tooltipText={tooltipText}
-                          />
-                        )}
-                      />
+                          ]}
+                          feedback={feedback}
+                          onLike={handleLike}
+                          onDislike={handleDislike}
+                          feedbackLabels={{
+                            like: t('chat:messages.like') || 'Like',
+                            dislike: t('chat:messages.dislike') || 'Dislike',
+                          }}
+                          showRegenerate={(() => {
+                            const hasOnRegenerate = Boolean(onRegenerate)
+                            const isCompleted =
+                              msg.subtaskStatus === 'COMPLETED' ||
+                              msg.subtaskStatus === 'CANCELLED' ||
+                              msg.status === 'completed'
+                            const isNotRunning =
+                              msg.subtaskStatus !== 'RUNNING' &&
+                              msg.subtaskStatus !== 'PENDING' &&
+                              msg.subtaskStatus !== 'PROCESSING' &&
+                              msg.status !== 'streaming' &&
+                              msg.status !== 'pending'
+                            return (
+                              hasOnRegenerate &&
+                              !isGroupChat &&
+                              isLastAiMessage &&
+                              isCompleted &&
+                              isNotRunning
+                            )
+                          })()}
+                          onRegenerateClick={() => setIsRegeneratePopoverOpen(true)}
+                          isRegenerating={isRegenerating}
+                          renderRegenerateButton={(defaultButton, tooltipText) => (
+                            <RegenerateModelPopover
+                              open={isRegeneratePopoverOpen}
+                              onOpenChange={setIsRegeneratePopoverOpen}
+                              selectedTeam={selectedTeam ?? null}
+                              onSelectModel={model => {
+                                onRegenerate?.(msg, model)
+                              }}
+                              isLoading={isRegenerating}
+                              trigger={defaultButton}
+                              tooltipText={tooltipText}
+                            />
+                          )}
+                        />
+                      )}
                     </>
                   ) : (
                     <>{renderMessageBody(msg, index)}</>

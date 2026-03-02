@@ -38,7 +38,7 @@ import {
   SkillRequestPayload,
   SkillResponsePayload,
 } from '@/types/socket'
-import type { TaskDetailSubtask, Team } from '@/types/api'
+import type { TaskDetailSubtask, Team, TaskType } from '@/types/api'
 import type { MessageBlock } from '../components/message/thinking/types'
 import { taskStateManager, generateMessageId, UnifiedMessage } from '../state'
 import DOMPurify from 'dompurify'
@@ -99,7 +99,7 @@ export interface ChatMessageRequest {
   git_repo_id?: number
   git_domain?: string
   branch_name?: string
-  task_type?: 'chat' | 'code' | 'knowledge' | 'task'
+  task_type?: TaskType
   // Knowledge base ID for knowledge type tasks
   knowledge_base_id?: number
   // Local device ID for task execution (optional, when undefined use cloud executor)
@@ -116,6 +116,15 @@ export interface ChatMessageRequest {
     namespace: string
     is_public: boolean
   }>
+  /** Action type. 'pipeline:confirm' for pipeline stage confirmation */
+  action?: 'pipeline:confirm' | string
+  /** Generation parameters for video/image generation tasks */
+  generate_params?: {
+    /** Resolution for generation (e.g., '1080p', '720p', '480p') */
+    resolution?: string
+    /** Aspect ratio for generation (e.g., '16:9', '9:16', '1:1') */
+    ratio?: string
+  }
 }
 
 /**
@@ -220,11 +229,8 @@ export function ChatStreamProvider({ children }: { children: ReactNode }) {
   // This handles the case where WebSocket events might have been missed while the page was in background
   usePageVisibility({
     minHiddenTime: 3000, // Recover if page was hidden for more than 3 seconds
-    onVisible: (wasHiddenFor: number) => {
+    onVisible: (_: number) => {
       if (taskStateManager.isInitialized() && isConnected) {
-        console.log(
-          `[ChatStreamContext] Page became visible after ${wasHiddenFor}ms, recovering all tasks`
-        )
         taskStateManager.recoverAll().catch(err => {
           console.error('[ChatStreamContext] Error recovering tasks after page visible:', err)
         })
@@ -252,11 +258,11 @@ export function ChatStreamProvider({ children }: { children: ReactNode }) {
    * Handle chat:start event from WebSocket
    */
   const handleChatStart = useCallback((data: ChatStartPayload) => {
-    const { task_id, subtask_id, shell_type } = data
+    const { task_id, subtask_id, shell_type, message_id } = data
 
     // Get or create state machine and dispatch event
     const machine = taskStateManager.getOrCreate(task_id)
-    machine.handleChatStart(subtask_id, shell_type)
+    machine.handleChatStart(subtask_id, shell_type, message_id)
   }, [])
 
   /**
@@ -706,6 +712,8 @@ export function ChatStreamProvider({ children }: { children: ReactNode }) {
         knowledge_base_id: request.knowledge_base_id,
         device_id: request.device_id,
         additional_skills: request.additional_skills,
+        action: request.action,
+        generate_params: request.generate_params,
       }
 
       try {

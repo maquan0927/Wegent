@@ -6,16 +6,18 @@
 
 # -*- coding: utf-8 -*-
 
+import asyncio
 import os
 from collections import OrderedDict
-from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from executor.callback.callback_client import CallbackClient
 from executor.config import config
 from shared.logger import setup_logger
+from shared.models import EmitterBuilder, ResponsesAPIEmitter, TransportFactory
+from shared.models.execution import ExecutionRequest
 from shared.status import TaskStatus
 from shared.utils import git_util
+from shared.utils.callback_client import CallbackClient
 from shared.utils.crypto import decrypt_git_token, is_token_encrypted
 
 logger = setup_logger("agent_base")
@@ -36,26 +38,78 @@ class Agent:
         """
         return self.__class__.__name__
 
-    def __init__(self, task_data: Dict[str, Any]):
+    def __init__(
+        self,
+        task_data: ExecutionRequest,
+        emitter: ResponsesAPIEmitter,
+    ):
         """
         Initialize the base agent
 
         Args:
-            task_data: The task data dictionary
+            task_data: The task data ExecutionRequest
+            emitter: Emitter instance for sending events. Required parameter.
+                     - Local mode: Use WebSocketTransport emitter
+                     - Docker mode: Use CallbackTransport emitter
         """
         self.task_data = task_data
-        self.callback_client = CallbackClient()
-        self.task_id = task_data.get("task_id", -1)
-        self.subtask_id = task_data.get("subtask_id", -1)
-        self.task_title = task_data.get("task_title", "")
-        self.subtask_title = task_data.get("subtask_title", "")
-        self.task_type = task_data.get(
-            "type"
+        self.callback_client = CallbackClient(callback_url=config.CALLBACK_URL)
+        self.task_id = task_data.task_id
+        self.subtask_id = task_data.subtask_id
+        self.task_title = task_data.task_title or ""
+        self.subtask_title = task_data.subtask_title or ""
+        self.task_type = (
+            task_data.type
         )  # Task type (e.g., "validation" for validation tasks)
         self.execution_status = TaskStatus.INITIALIZED
         self.project_path = None
 
-    def handle(
+        # Emitter is required and must be provided by caller
+        self.emitter: ResponsesAPIEmitter = emitter
+
+    def get_emitter(self) -> ResponsesAPIEmitter:
+        """
+        Get the emitter instance for this agent.
+
+        Returns:
+            ResponsesAPIEmitter: The emitter instance
+        """
+        return self.emitter
+
+    def update_emitter(self, new_subtask_id: int) -> None:
+        """
+        Update the agent's emitter to use a new subtask_id.
+
+        Called when an existing agent is reused for a new subtask (e.g., append chat).
+        Rebuilds the emitter with the new subtask_id so that all subsequent
+        callback events carry the correct subtask_id.
+
+        Args:
+            new_subtask_id: The new subtask ID to use for emitter events
+        """
+        old_subtask_id = self.subtask_id
+        self.subtask_id = new_subtask_id
+        self.task_data.subtask_id = new_subtask_id
+        self.emitter = (
+            EmitterBuilder()
+            .with_task(self.task_id, new_subtask_id)
+            .with_transport(
+                TransportFactory.create_callback_throttled(
+                    callback_url=config.CALLBACK_URL
+                )
+            )
+            .with_executor_info(
+                name=os.getenv("EXECUTOR_NAME"),
+                namespace=os.getenv("EXECUTOR_NAMESPACE"),
+            )
+            .build()
+        )
+        logger.info(
+            f"Agent[{self.get_name()}][{self.task_id}] updated emitter subtask_id: "
+            f"{old_subtask_id} -> {new_subtask_id}"
+        )
+
+    async def handle(
         self, pre_executed: Optional[TaskStatus] = None
     ) -> Tuple[TaskStatus, Optional[str]]:
         """
@@ -79,12 +133,10 @@ class Agent:
                 logger.info(
                     f"Agent[{self.get_name()}][{self.task_id}] handle: Starting pre_execute."
                 )
-                pre_execute_status = self.pre_execute()
+                pre_execute_status = await self.pre_execute()
                 if pre_execute_status != TaskStatus.SUCCESS:
                     error_msg = f"Agent[{self.get_name()}][{self.task_id}] handle: pre_execute failed."
                     logger.error(error_msg)
-                    # Try to record error thinking
-                    # self._record_error_thinking("Pre-execution failed", error_msg)
                     return TaskStatus.FAILED, error_msg
                 logger.info(
                     f"Agent[{self.get_name()}][{self.task_id}] handle: pre_execute succeeded, starting execute."
@@ -104,8 +156,6 @@ class Agent:
         except Exception as e:
             error_msg = f"Agent[{self.get_name()}][{self.task_id}] handle: Exception during execute: {str(e)}"
             logger.exception(error_msg)
-            # Record error thinking
-            # self._record_error_thinking("Execution Exception", error_msg)
             return TaskStatus.FAILED, error_msg
 
     def report_progress(
@@ -116,36 +166,58 @@ class Agent:
         result: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        Report progress to the executor_manager
+        Report progress to the executor_manager using OpenAI Responses API format.
+
+        Uses the emitter created during agent initialization.
+
+        For FAILED status, sends an error event instead of in_progress event
+        to ensure the frontend receives the error notification.
 
         Args:
             progress: The progress percentage (0-100)
-            status: Optional status string
-            message: Optional message string
+            status: Optional status string (e.g., "FAILED", "RUNNING", "COMPLETED")
+            message: Optional message string (used as error message for FAILED status)
             result: Optional result data dictionary
         """
+        import asyncio
+
         logger.info(
             f"Reporting progress: {progress}%, status: {status}, message: {message}, result: {result}, task_type: {self.task_type}"
         )
         try:
-            self.callback_client.send_callback(
-                task_id=self.task_id,
-                subtask_id=self.subtask_id,
-                task_title=self.task_title,
-                subtask_title=self.subtask_title,
-                progress=progress,
-                status=status,
-                message=message,
-                result=result,
-                task_type=self.task_type,
-            )
+            # Determine if this is a failure status
+            is_failed = status == TaskStatus.FAILED.value if status else False
+
+            async def _send_progress():
+                if is_failed:
+                    # Send error event for FAILED status so frontend receives the error
+                    error_message = message or "Task execution failed"
+                    await self.get_emitter().error(
+                        error_message, code="execution_error"
+                    )
+                else:
+                    await self.get_emitter().in_progress()
+
+            # Run async in sync context
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(_send_progress())
+                return
+
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _send_progress())
+                future.result()
         except Exception as e:
             logger.critical(
                 f"[CALLBACK_FAIL] task_id={self.task_id}, progress={progress}, "
                 f"status={status}, error={type(e).__name__}: {str(e)}"
             )
 
-    def pre_execute(self) -> TaskStatus:
+    async def pre_execute(self) -> TaskStatus:
         """
         Pre-execution hook for tasks such as code download, environment setup, etc.
         Subclasses can override this method to implement custom pre-execution logic.
@@ -167,13 +239,13 @@ class Agent:
         """
         raise NotImplementedError("Subclasses must implement execute()")
 
-    def download_code(self):
-        git_url = self.task_data.get("git_url", "")
+    async def download_code(self):
+        git_url = self.task_data.git_url or ""
         if git_url == "":
             logger.info("git url is empty, skip download code")
             return
 
-        user_config = self.task_data.get("user")
+        user_config = self.task_data.user if self.task_data.user else {}
         git_token = user_config.get("git_token")
         # Handle encrypted tokens
         if git_token and is_token_encrypted(git_token):
@@ -182,13 +254,13 @@ class Agent:
             )
             git_token = decrypt_git_token(git_token)
 
-        username = user_config.get("user_name")
-        branch_name = self.task_data.get("branch_name")
+        username = user_config.get("git_login") if user_config else None
+        branch_name = self.task_data.branch_name
         repo_name = git_util.get_repo_name_from_url(git_url)
         logger.info(
             f"Agent[{self.get_name()}][{self.task_id}] start download code for git url: {git_url}, branch name: {branch_name}"
         )
-        logger.info("username: {username} git token: {git_token}")
+
         logger.info(user_config)
 
         project_path = os.path.join(
@@ -198,13 +270,14 @@ class Agent:
             self.project_path = project_path
 
         if not os.path.exists(project_path):
-            success, error_msg = git_util.clone_repo(
-                git_url, branch_name, project_path, username, git_token
+            # Offload blocking git clone to a thread so the event loop is not blocked
+            success, error_msg = await asyncio.to_thread(
+                git_util.clone_repo, git_url, branch_name, project_path, username, git_token
             )
 
             if success:
                 # Setup git config with user information
-                self.setup_git_config(user_config, project_path)
+                await self.setup_git_config(user_config, project_path)
                 logger.info(
                     f"Agent[{self.get_name()}][{self.task_id}] Project cloned to {project_path}"
                 )
@@ -232,7 +305,7 @@ class Agent:
         )
         return TaskStatus.SUCCESS
 
-    def setup_git_config(self, user_config, project_path):
+    async def setup_git_config(self, user_config, project_path):
         """
         Setup git config with user information
 
@@ -252,8 +325,9 @@ class Agent:
                 f"Agent[{self.get_name()}][{self.task_id}] "
                 f"Setting git config user.name='{git_login}', user.email='{git_email}'"
             )
-            success, error_msg = git_util.set_git_config(
-                project_path, git_login, git_email
+            # Offload subprocess to thread
+            success, error_msg = await asyncio.to_thread(
+                git_util.set_git_config, project_path, git_login, git_email
             )
             if not success:
                 logger.error(

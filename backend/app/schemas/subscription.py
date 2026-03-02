@@ -8,6 +8,7 @@ Subscription (订阅) CRD schemas for automated task execution.
 Subscription is a CRD resource that defines scheduled or event-triggered
 task executions. It replaces the previous Flow concept.
 """
+
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -331,6 +332,11 @@ class SubscriptionBase(BaseModel):
         description="Knowledge bases to bind to this subscription. "
         "AI will have access to these knowledge bases during execution.",
     )
+    market_whitelist_user_ids: Optional[List[int]] = Field(
+        None,
+        description="User IDs allowed to discover and rent this market subscription. "
+        "If empty or omitted, all users can discover and rent it.",
+    )
 
 
 class SubscriptionCreate(SubscriptionBase):
@@ -367,6 +373,8 @@ class SubscriptionUpdate(BaseModel):
     history_message_count: Optional[int] = Field(None, ge=0, le=50)
     # Knowledge base references
     knowledge_base_refs: Optional[List[SubscriptionKnowledgeBaseRef]] = None
+    # Market whitelist
+    market_whitelist_user_ids: Optional[List[int]] = None
 
 
 class SubscriptionInDB(SubscriptionBase):

@@ -14,10 +14,12 @@ compatibility with specific shell types.
 
 import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from executor.agents.base import Agent
 from shared.logger import setup_logger
+from shared.models import ResponsesAPIEmitter
+from shared.models.execution import ExecutionRequest
 from shared.status import TaskStatus
 
 logger = setup_logger("image_validator")
@@ -71,12 +73,15 @@ class ImageValidatorAgent(Agent):
         ],
     }
 
-    def __init__(self, task_data: Dict[str, Any]):
-        super().__init__(task_data)
-        self.task_data = task_data
+    def __init__(
+        self,
+        task_data: ExecutionRequest,
+        emitter: ResponsesAPIEmitter,
+    ) -> None:
+        super().__init__(task_data, emitter)
 
         # Get validation parameters from task data
-        validation_params = task_data.get("validation_params", {})
+        validation_params = task_data.validation_params or {}
         self.shell_type = validation_params.get("shell_type", "")
         self.image = validation_params.get("image", "")
         self.shell_name = validation_params.get("shell_name", "")
@@ -152,6 +157,9 @@ class ImageValidatorAgent(Agent):
 
         logger.info(f"Validation completed: valid={all_passed}, checks={len(results)}")
 
+        # Store for retrieval by task_processor to include in done_event
+        self.validation_result = validation_result
+
         # Send result via callback with result data including validation_id
         self.report_progress(
             progress=100,
@@ -166,7 +174,7 @@ class ImageValidatorAgent(Agent):
 
         return TaskStatus.COMPLETED
 
-    def _run_check(self, check: Dict[str, Any]) -> Dict[str, Any]:
+    def _run_check(self, check: dict[str, Any]) -> dict[str, Any]:
         """Run a single validation check"""
         name = check["name"]
         command = check["command"]

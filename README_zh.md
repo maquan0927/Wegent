@@ -23,6 +23,47 @@
 
 ---
 
+## 🏗️ 架构概览
+
+```mermaid
+graph TB
+    subgraph Access["入口层"]
+        direction TB
+        Web["🌐 网页"]
+        IM["💬 IM 工具"]
+        API["🔌 API"]
+    end
+
+    subgraph Features["功能层"]
+        direction TB
+        Chat["💬 对话"]
+        Code["💻 编码"]
+        Feed["📡 定时任务"]
+        Knowledge["📚 知识库"]
+    end
+
+    subgraph Agents["Agent 层"]
+        direction TB
+        ChatShell["🗣️ Wegent Chat"]
+        ClaudeCode["🧠 Claude Code"]
+        Agno["🤝 Agno"]
+        Dify["✨ Dify"]
+    end
+
+    subgraph Execution["执行环境"]
+        direction TB
+        Docker["🐳 Agent 沙箱"]
+        Cloud["☁️ 云端设备"]
+        Local["💻 本地设备"]
+    end
+
+    Access --> Features
+    Features --> Agents
+    Agents --> Execution
+```
+
+---
+
 ## ✨ 核心功能
 
 ### 💬 对话模式
@@ -83,6 +124,13 @@
 - **槽位调度**：为每个设备配置并发任务槽位数
 - **安全连接**：通过认证的 WebSocket 连接到 Wegent 后端
 
+### 💬 IM 集成
+
+将 AI 智能体集成到你常用的 IM 工具中：
+
+- **钉钉机器人**：将智能体部署为钉钉机器人，支持团队协作
+- **Telegram 机器人**：连接智能体到 Telegram，支持个人或群组对话
+
 ### 🔧 定制化
 
 上面的所有功能都是可定制的：
@@ -106,6 +154,8 @@
 
 ## 🚀 快速开始
 
+### 方式一：快速安装（推荐）
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wecode-ai/Wegent/main/install.sh | bash
 ```
@@ -113,6 +163,73 @@ curl -fsSL https://raw.githubusercontent.com/wecode-ai/Wegent/main/install.sh | 
 然后在浏览器中访问 http://localhost:3000
 
 > 可选：启用 RAG 功能 `docker compose --profile rag up -d`
+
+### 方式二：源码安装
+
+如果你已经克隆了源码，可以直接运行安装脚本，它会自动检测源码环境并从本地构建镜像：
+
+```bash
+git clone https://github.com/wecode-ai/Wegent.git
+cd Wegent
+./install.sh
+```
+
+或者在源码目录中手动指定使用本地构建：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+```
+
+**常用命令（源码模式）：**
+```bash
+# 查看日志
+docker compose -f docker-compose.yml -f docker-compose.build.yml logs -f
+
+# 停止服务
+docker compose -f docker-compose.yml -f docker-compose.build.yml down
+
+# 启动服务
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+
+# 重新构建镜像
+docker compose -f docker-compose.yml -f docker-compose.build.yml build --no-cache
+```
+
+### 方式三：本地开发模式
+
+如果你是开发者，想要快速调试和热重载，可以使用本地开发模式：
+
+```bash
+git clone https://github.com/wecode-ai/Wegent.git
+cd Wegent
+./start.sh
+```
+
+**本地开发模式特点：**
+- 直接运行服务，不使用 Docker
+- 代码修改后自动热重载
+- 适合日常开发调试
+
+**常用命令（本地开发模式）：**
+```bash
+# 启动服务
+./start.sh
+
+# 停止服务
+./start.sh --stop
+
+# 重启服务
+./start.sh --restart
+
+# 查看状态
+./start.sh --status
+
+# 初始化配置
+./start.sh --init
+
+# 查看帮助
+./start.sh --help
+```
 
 ---
 
@@ -124,20 +241,6 @@ curl -fsSL https://raw.githubusercontent.com/wecode-ai/Wegent/main/install.sh | 
 | translator | 多语言翻译 |
 | dev-team | Git 工作流：分支 → 编码 → 提交 → PR |
 | wiki-team | 代码库 Wiki 文档生成 |
-
----
-
-## 🏗️ 架构
-
-```
-Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (ClaudeCode/Agno/Dify/Chat)
-```
-
-**核心概念：**
-- **Ghost** (提示词) + **Shell** (执行环境) + **Model** = **Bot**
-- 多个 **Bot** + **协作模式** = **Team**
-
-> 详见 [核心概念](https://wecode-ai.github.io/wegent-docs/zh/concepts/core-concepts) | [YAML 规范](https://wecode-ai.github.io/wegent-docs/zh/reference/yaml-specification)
 
 ---
 
@@ -186,13 +289,6 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/johnny0120">
-            <img src="https://avatars.githubusercontent.com/u/15564476?v=4" width="80;" alt="johnny0120"/>
-            <br />
-            <sub><b>Johnny0120</b></sub>
-        </a>
-    </td>
-    <td align="center">
         <a href="https://github.com/FicoHu">
             <img src="https://avatars.githubusercontent.com/u/19767574?v=4" width="80;" alt="FicoHu"/>
             <br />
@@ -200,10 +296,10 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/kissghosts">
-            <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
+        <a href="https://github.com/johnny0120">
+            <img src="https://avatars.githubusercontent.com/u/15564476?v=4" width="80;" alt="johnny0120"/>
             <br />
-            <sub><b>Yanhe</b></sub>
+            <sub><b>Johnny0120</b></sub>
         </a>
     </td>
     <td align="center">
@@ -211,6 +307,13 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
             <img src="https://avatars.githubusercontent.com/u/3120662?v=4" width="80;" alt="yixiangxx"/>
             <br />
             <sub><b>Yi Xiang</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/kissghosts">
+            <img src="https://avatars.githubusercontent.com/u/3409715?v=4" width="80;" alt="kissghosts"/>
+            <br />
+            <sub><b>Yanhe</b></sub>
         </a>
     </td></tr>
 <tr>
@@ -257,20 +360,27 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/kerwin612">
+            <img src="https://avatars.githubusercontent.com/u/3371163?v=4" width="80;" alt="kerwin612"/>
+            <br />
+            <sub><b>Kerwin Bryant</b></sub>
+        </a>
+    </td>
+    <td align="center">
         <a href="https://github.com/junbaor">
             <img src="https://avatars.githubusercontent.com/u/10198622?v=4" width="80;" alt="junbaor"/>
             <br />
             <sub><b>Junbaor</b></sub>
         </a>
-    </td>
+    </td></tr>
+<tr>
     <td align="center">
         <a href="https://github.com/fingki">
             <img src="https://avatars.githubusercontent.com/u/11422037?v=4" width="80;" alt="fingki"/>
             <br />
             <sub><b>Fingki</b></sub>
         </a>
-    </td></tr>
-<tr>
+    </td>
     <td align="center">
         <a href="https://github.com/fengkuizhi">
             <img src="https://avatars.githubusercontent.com/u/3616484?v=4" width="80;" alt="fengkuizhi"/>
@@ -307,6 +417,21 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
         </a>
     </td>
     <td align="center">
+        <a href="https://github.com/LiDaiyan">
+            <img src="https://avatars.githubusercontent.com/u/36092701?v=4" width="80;" alt="LiDaiyan"/>
+            <br />
+            <sub><b>Li Daiyan</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/RichardoMrMu">
+            <img src="https://avatars.githubusercontent.com/u/44485717?v=4" width="80;" alt="RichardoMrMu"/>
+            <br />
+            <sub><b>RichardoMu</b></sub>
+        </a>
+    </td></tr>
+<tr>
+    <td align="center">
         <a href="https://github.com/andrewzq777">
             <img src="https://avatars.githubusercontent.com/u/223815624?v=4" width="80;" alt="andrewzq777"/>
             <br />
@@ -318,6 +443,13 @@ Frontend (Next.js) → Backend (FastAPI) → Executor Manager → Executors (Cla
             <img src="https://avatars.githubusercontent.com/u/3962041?v=4" width="80;" alt="graindt"/>
             <br />
             <sub><b>Graindt</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/qingchengliu">
+            <img src="https://avatars.githubusercontent.com/u/20255838?v=4" width="80;" alt="qingchengliu"/>
+            <br />
+            <sub><b>Qingcheng</b></sub>
         </a>
     </td>
     <td align="center">

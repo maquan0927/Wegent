@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import type { TaskType } from './api'
+
 /**
  * Socket.IO event types and payload definitions
  */
@@ -114,7 +116,7 @@ export interface ChatSendPayload {
   git_repo_id?: number
   git_domain?: string
   branch_name?: string
-  task_type?: 'chat' | 'code' | 'knowledge' | 'task'
+  task_type?: TaskType
   // Knowledge base ID for knowledge type tasks
   knowledge_base_id?: number
   // Local device execution
@@ -130,6 +132,17 @@ export interface ChatSendPayload {
     namespace: string
     is_public: boolean
   }>
+  /** Action type. 'pipeline:confirm' for pipeline stage confirmation */
+  action?: 'pipeline:confirm' | string
+  /** Generation parameters for video/image generation tasks */
+  generate_params?: {
+    /** Resolution for generation (e.g., '1080p', '720p', '480p') */
+    resolution?: string
+    /** Aspect ratio for generation (e.g., '16:9', '9:16', '1:1') */
+    ratio?: string
+    /** Duration in seconds for video generation */
+    duration?: number
+  }
 }
 
 export interface ChatCancelPayload {
@@ -196,6 +209,8 @@ export interface ChatStartPayload {
   subtask_id: number
   bot_name?: string
   shell_type?: string // Shell type for frontend display (Chat, ClaudeCode, Agno, etc.)
+  /** Message ID for ordering (primary sort key) */
+  message_id?: number
 }
 
 export interface ChatChunkPayload {
@@ -525,6 +540,13 @@ export interface ChatSendAck {
   subtask_id?: number
   message_id?: number // Message ID for the user's subtask
   error?: string
+  // Pipeline confirmation response fields
+  /** Current stage number (1-indexed) */
+  current_stage?: number
+  /** Total number of stages in the pipeline */
+  total_stages?: number
+  /** Name of the next stage (null if pipeline completed) */
+  next_stage_name?: string | null
 }
 
 export interface TaskJoinAck {

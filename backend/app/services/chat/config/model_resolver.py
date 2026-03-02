@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.kind import Kind
 from app.schemas.kind import Bot, Model
+from shared.models.execution import ExecutionRequest
 from shared.utils.crypto import decrypt_api_key
 
 logger = logging.getLogger(__name__)
@@ -44,16 +45,17 @@ def resolve_env_placeholder(value: str) -> str:
 
     def replace_env(match):
         env_var = match.group(1)
-        env_value = os.environ.get(env_var, "")
-        if env_value:
+        env_value = os.environ.get(env_var)
+        if env_value is not None:
             logger.info(
                 f"[model_resolver] Resolved env var ${{{env_var}}} to value (length={len(env_value)})"
             )
+            return env_value
         else:
             logger.warning(
-                f"[model_resolver] Env var ${{{env_var}}} not found or empty"
+                f"[model_resolver] Env var ${{{env_var}}} not found, keeping placeholder"
             )
-        return env_value
+            return match.group(0)  # Return original placeholder unchanged
 
     return re.sub(pattern, replace_env, value)
 
@@ -226,7 +228,7 @@ def _process_model_config_placeholders(
     user_id: int,
     user_name: str,
     agent_config: Optional[Dict[str, Any]] = None,
-    task_data: Optional[Dict[str, Any]] = None,
+    task_data: Optional[ExecutionRequest] = None,
 ) -> Dict[str, Any]:
     """
     Process placeholders in model_config (api_key and default_headers).
@@ -239,7 +241,7 @@ def _process_model_config_placeholders(
         user_id: Current user's ID
         user_name: Current user's username
         agent_config: Optional agent config from bot (for chat mode)
-        task_data: Optional task data (for chat mode)
+        task_data: Optional[ExecutionRequest] containing task-specific data (for chat mode)
 
     Returns:
         Model config with placeholders replaced in api_key and default_headers
@@ -251,9 +253,18 @@ def _process_model_config_placeholders(
         "user_name": user_name or "",
     }
 
-    # Build task_data with user info if not provided
+    # Build task_data dict for data_sources
     # This ensures ${task_data.user.name} placeholders work even without full task context
-    effective_task_data = task_data or {}
+    if task_data is not None:
+        if isinstance(task_data, dict):
+            effective_task_data = task_data
+        elif hasattr(task_data, "to_dict") and callable(task_data.to_dict):
+            effective_task_data = task_data.to_dict()
+        else:
+            effective_task_data = {}
+    else:
+        effective_task_data = {}
+
     if "user" not in effective_task_data:
         effective_task_data = {**effective_task_data, "user": user_info}
 
@@ -271,11 +282,11 @@ def _process_model_config_placeholders(
     api_key = model_config.get("api_key", "")
     if api_key and "${" in api_key:
         processed_api_key = replace_placeholders_with_sources(api_key, data_sources)
-        model_config["api_key"] = processed_api_key
-        logger.info(
-            f"[model_resolver] Processed api_key placeholder, "
-            f"has_value={bool(processed_api_key)}"
-        )
+        if processed_api_key:
+            model_config["api_key"] = processed_api_key
+            logger.debug(
+                f"[model_resolver] Processed api_key placeholder, from: {api_key} "
+            )
 
     # Process DEFAULT_HEADERS with placeholder replacement
     raw_default_headers = model_config.get("default_headers", {})
@@ -294,7 +305,7 @@ def extract_and_process_model_config(
     user_id: int,
     user_name: str,
     agent_config: Optional[Dict[str, Any]] = None,
-    task_data: Optional[Dict[str, Any]] = None,
+    task_data: Optional[ExecutionRequest] = None,
 ) -> Dict[str, Any]:
     """
     Extract model configuration from spec and process all placeholders.
@@ -309,7 +320,8 @@ def extract_and_process_model_config(
         user_id: Current user's ID
         user_name: Current user's username
         agent_config: Optional agent config from bot (for chat mode)
-        task_data: Optional task data (for chat mode)
+        task_data: Optional[ExecutionRequest] containing task-specific data
+            used for placeholder substitution (e.g., ${task_data.user.name})
 
     Returns:
         Dict with fully processed model configuration:
@@ -336,15 +348,17 @@ def extract_and_process_model_config(
     return model_config
 
 
-def get_model_config_for_bot(
+def _resolve_model_for_bot(
     db: Session,
     bot: Kind,
     user_id: int,
     override_model_name: Optional[str] = None,
     force_override: bool = False,
-) -> Dict[str, Any]:
+) -> tuple[Optional[Kind], Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     """
-    Get model configuration for a Bot.
+    Resolve model Kind and spec for a bot.
+
+    Shared logic for build_agent_config_for_bot and get_model_config_for_bot.
 
     Resolution priority:
     1. override_model_name with force_override=True (task-level override)
@@ -360,6 +374,105 @@ def get_model_config_for_bot(
         force_override: If True, override_model_name takes highest priority
 
     Returns:
+        Tuple of (model_kind, model_spec, model_name, raw_agent_config).
+        model_kind/model_spec/model_name may be None if no model is found.
+    """
+    bot_crd = Bot.model_validate(bot.json)
+    bot_json = bot.json or {}
+    bot_spec = bot_json.get("spec", {})
+    raw_agent_config = bot_spec.get("agent_config", {})
+
+    model_name = None
+
+    # Priority 1: Force override from task
+    if force_override and override_model_name:
+        model_name = override_model_name
+        logger.info(f"Using task model (force override): {model_name}")
+    else:
+        # Priority 2: Bot's agent_config.bind_model
+        bind_model = raw_agent_config.get("bind_model")
+        if bind_model and isinstance(bind_model, str) and bind_model.strip():
+            model_name = bind_model.strip()
+            logger.info(f"Using bot bound model: {model_name}")
+
+        # Priority 3: Bot's modelRef (legacy)
+        if not model_name and bot_crd.spec.modelRef:
+            model_name = bot_crd.spec.modelRef.name
+            logger.info(f"Using bot modelRef: {model_name}")
+
+        # Priority 4: Task-level override (fallback)
+        if not model_name and override_model_name:
+            model_name = override_model_name
+            logger.info(f"Using task model (fallback): {model_name}")
+
+    if not model_name:
+        return None, None, None, raw_agent_config
+
+    # Find the model Kind object
+    model_kind, model_spec = _find_model_with_namespace(db, model_name, user_id)
+    return model_kind, model_spec, model_name, raw_agent_config
+
+
+def build_agent_config_for_bot(
+    db: Session,
+    bot: Kind,
+    user_id: int,
+    override_model_name: Optional[str] = None,
+    force_override: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build agent_config for a bot based on its model binding.
+
+    Resolves the model and returns agent_config in the format that
+    downstream executors expect: {"env": {"model": "...", "api_key": "...", ...}}.
+    """
+    # Short-circuit: if raw agent_config already has inline model config, use it
+    bot_json = bot.json or {}
+    raw_agent_config = bot_json.get("spec", {}).get("agent_config", {})
+    if not (force_override and override_model_name):
+        raw_env = raw_agent_config.get("env", {})
+        if raw_env.get("model") and raw_env.get("api_key"):
+            return raw_agent_config
+
+    model_kind, model_spec, model_name, raw_agent_config = _resolve_model_for_bot(
+        db, bot, user_id, override_model_name, force_override
+    )
+
+    if not model_spec:
+        if model_name:
+            logger.warning(
+                "[build_agent_config_for_bot] Model '%s' not found, "
+                "returning raw agent_config",
+                model_name,
+            )
+        return raw_agent_config
+
+    # Return the model's modelConfig directly - this contains the "env" dict
+    # that executors expect (e.g., {"env": {"model": "claude", "api_key": "...", ...}})
+    model_config_dict = model_spec.get("modelConfig", {})
+    if not model_config_dict:
+        return raw_agent_config
+
+    # Include protocol if present in the model spec
+    protocol = model_spec.get("protocol")
+    if protocol:
+        model_config_dict = dict(model_config_dict)
+        model_config_dict["protocol"] = protocol
+
+    return model_config_dict
+
+
+def get_model_config_for_bot(
+    db: Session,
+    bot: Kind,
+    user_id: int,
+    override_model_name: Optional[str] = None,
+    force_override: bool = False,
+) -> Dict[str, Any]:
+    """
+    Get model configuration for a Bot (flat format for Chat Shell).
+
+    Returns:
         Dict containing model configuration:
         {
             "api_key": "sk-xxx",
@@ -373,54 +486,20 @@ def get_model_config_for_bot(
     Raises:
         ValueError: If no model is configured or model not found
     """
-    bot_crd = Bot.model_validate(bot.json)
-    model_name = None
-    model_namespace = "default"
-
-    # Priority 1: Force override from task
-    if force_override and override_model_name:
-        model_name = override_model_name
-        logger.info(f"Using task model (force override): {model_name}")
-    else:
-        # Priority 2: Bot's agent_config.bind_model
-        # Note: Bot CRD doesn't have agent_config directly, check if it's in the JSON
-        bot_json = bot.json or {}
-        spec = bot_json.get("spec", {})
-        agent_config = spec.get("agent_config", {})
-        bind_model = agent_config.get("bind_model")
-        bind_model_namespace = agent_config.get("bind_model_namespace", "default")
-
-        if bind_model and isinstance(bind_model, str) and bind_model.strip():
-            model_name = bind_model.strip()
-            model_namespace = bind_model_namespace
-            logger.info(
-                f"Using bot bound model: {model_name} (namespace: {model_namespace})"
-            )
-
-        # Priority 3: Bot's modelRef (legacy)
-        if not model_name and bot_crd.spec.modelRef:
-            model_name = bot_crd.spec.modelRef.name
-            model_namespace = bot_crd.spec.modelRef.namespace or "default"
-            logger.info(
-                f"Using bot modelRef: {model_name} (namespace: {model_namespace})"
-            )
-
-        # Priority 4: Task-level override (fallback)
-        if not model_name and override_model_name:
-            model_name = override_model_name
-            logger.info(f"Using task model (fallback): {model_name}")
+    model_kind, model_spec, model_name, _ = _resolve_model_for_bot(
+        db, bot, user_id, override_model_name, force_override
+    )
 
     if not model_name:
         raise ValueError(f"Bot {bot.name} has no model configured")
 
-    # Find the model and get its namespace
-    model_kind, model_spec = _find_model_with_namespace(db, model_name, user_id)
     if not model_spec:
         raise ValueError(f"Model {model_name} not found")
 
     # Use the actual namespace from the found model
-    if model_kind:
-        model_namespace = model_kind.namespace or "default"
+    model_namespace = (
+        model_kind.namespace if model_kind and model_kind.namespace else "default"
+    )
 
     # Extract configuration and add model_name/model_namespace
     config = _extract_model_config(model_spec)
@@ -563,7 +642,6 @@ def _extract_model_config(model_spec: Dict[str, Any]) -> Dict[str, Any]:
     model_type = env.get("model", "openai")
 
     # Resolve environment variable placeholders in api_key
-    # This handles cases like api_key="${WECODE_API_KEY}"
     if api_key and "${" in api_key:
         logger.info(
             f"[model_resolver] api_key contains placeholder, resolving from env..."
@@ -645,10 +723,19 @@ def _extract_model_config(model_spec: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(
             f"[model_resolver] _extract_model_config: using responses API from protocol={protocol}"
         )
-
     # Context window and output token limits from modelConfig
     context_window = model_config.get("context_window")
     max_output_tokens = model_config.get("max_output_tokens")
+
+    # Model category type (llm, video, tts, etc.) - used for routing
+    model_category_type = model_spec.get("modelType")
+    if model_category_type:
+        logger.info(
+            f"[model_resolver] _extract_model_config: modelType={model_category_type}"
+        )
+
+    # Video generation config (when modelType='video')
+    video_config = model_spec.get("videoConfig")
 
     return {
         "api_key": api_key,
@@ -662,6 +749,10 @@ def _extract_model_config(model_spec: Dict[str, Any]) -> Dict[str, Any]:
         # Context window and output token limits from ModelSpec or modelConfig
         "context_window": context_window,
         "max_output_tokens": max_output_tokens,
+        # Model category type for routing (llm, video, tts, etc.)
+        "modelType": model_category_type,
+        # Video generation config (resolution, ratio, duration, etc.)
+        "videoConfig": video_config,
     }
 
 

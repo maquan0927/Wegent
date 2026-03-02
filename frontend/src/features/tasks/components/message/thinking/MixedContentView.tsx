@@ -11,6 +11,10 @@ import { ToolBlock } from './components/ToolBlock'
 import EnhancedMarkdown from '@/components/common/EnhancedMarkdown'
 import { normalizeToolName } from './utils/toolExtractor'
 import { useTranslation } from '@/hooks/useTranslation'
+import { processCitePatterns } from '../../../utils/processCitePatterns'
+import type { GeminiAnnotation } from '@/types/socket'
+import VideoPlayer from '../VideoPlayer'
+import { ImageGallery } from '../ImageGallery'
 
 interface MixedContentViewProps {
   thinking: ThinkingStep[] | null
@@ -18,6 +22,7 @@ interface MixedContentViewProps {
   taskStatus?: string // For future use (e.g., showing pending states)
   theme: 'light' | 'dark'
   blocks?: MessageBlock[] // NEW: Block-based rendering support
+  annotations?: GeminiAnnotation[]
 }
 
 /**
@@ -34,6 +39,7 @@ const MixedContentView = memo(function MixedContentView({
   taskStatus,
   theme,
   blocks,
+  annotations,
 }: MixedContentViewProps) {
   const { t } = useTranslation('chat')
   // Extract tools from thinking (legacy mode)
@@ -51,19 +57,62 @@ const MixedContentView = memo(function MixedContentView({
   }, [toolGroups])
 
   // Build mixed content array - prefer blocks if available
+  // Build mixed content array - prefer blocks if available
   const mixedItems = useMemo(() => {
     // NEW: Block-based rendering (preferred)
     if (blocks && blocks.length > 0) {
       const mapped = blocks
         .map(block => {
           if (block.type === 'text') {
+            // CRITICAL FIX: When page refreshes during streaming, block.content may be empty
+            // but the actual content is in the `content` prop (from cached_content).
+            // We need to use the `content` prop as fallback when block.content is empty.
+            let textContent = block.content || ''
+
+            // If block.content is empty but we have content prop, use it
+            // This handles the page refresh recovery case
+            if (!textContent && content) {
+              // Handle ${$$}$ separator - only show the result part (after separator)
+              if (content.includes('${$$}$')) {
+                const parts = content.split('${$$}$')
+                textContent = parts[1] || ''
+              } else {
+                textContent = content
+              }
+            }
+
             return {
               type: 'content' as const,
-              content: block.content || '',
+              content: textContent,
               blockId: block.id,
             }
+          } else if (block.type === 'video') {
+            // Video block - render VideoPlayer component
+            return {
+              type: 'video' as const,
+              blockId: block.id,
+              isPlaceholder: block.is_placeholder ?? false,
+              videoUrl: block.video_url || '',
+              thumbnail: block.video_thumbnail,
+              duration: block.video_duration,
+              attachmentId: block.video_attachment_id,
+              progress: block.video_progress ?? 0,
+              status: block.status,
+              message: block.content, // Progress message
+            }
+          } else if (block.type === 'image') {
+            // Image block - render ImageGallery component
+            return {
+              type: 'image' as const,
+              blockId: block.id,
+              isPlaceholder: block.is_placeholder ?? false,
+              imageUrls: block.image_urls || [],
+              imageAttachmentIds: block.image_attachment_ids || [],
+              imageCount: block.image_count ?? 0,
+              status: block.status,
+              message: block.content, // Progress message
+            }
           } else if (block.type === 'tool') {
-            // Convert MessageBlock to ToolPair format for ToolBlock component
             // Normalize tool name to match preset components (e.g., sandbox_write_file -> Write)
             const normalizedToolName = normalizeToolName(block.tool_name || 'unknown')
             const toolPair = {
@@ -110,10 +159,32 @@ const MixedContentView = memo(function MixedContentView({
           return null
         })
         .filter(Boolean)
-      console.log('[MixedContentView] After mapping and filtering:', {
-        mappedCount: mapped.length,
-        mappedTypes: mapped.map(m => (m as { type: string }).type),
-      })
+
+      // CRITICAL FIX: When blocks exist but no text blocks, we need to also render
+      // the main content. This handles the case where:
+      // 1. chat:block_created creates a tool block
+      // 2. chat:chunk sends text content (accumulated in message.content)
+      // 3. Without this fix, only tool blocks are rendered, text content is lost
+      const hasTextBlock = blocks.some(b => b.type === 'text')
+      if (!hasTextBlock && content && content.trim()) {
+        // Handle ${$$}$ separator - only show the result part (after separator)
+        // This separator is used to split prompt and result in some message formats
+        let contentToRender = content
+        if (content.includes('${$$}$')) {
+          const parts = content.split('${$$}$')
+          contentToRender = parts[1] || ''
+        }
+
+        if (contentToRender && contentToRender.trim()) {
+          // Add main content at the end (after tool blocks)
+          mapped.push({
+            type: 'content' as const,
+            content: contentToRender,
+            blockId: 'main-content',
+          })
+        }
+      }
+
       return mapped
     }
 
@@ -187,9 +258,61 @@ const MixedContentView = memo(function MixedContentView({
             return null
           }
           const key = 'blockId' in item ? item.blockId : `content-${index}`
+          const textContent =
+            annotations && annotations.length > 0
+              ? processCitePatterns(item.content, annotations)
+              : item.content
           return (
             <div key={key} className="text-sm">
-              <EnhancedMarkdown source={item.content} theme={theme} />
+              <EnhancedMarkdown source={textContent} theme={theme} />
+            </div>
+          )
+        } else if (item.type === 'video') {
+          // Render video block using VideoPlayer component
+          return (
+            <div key={item.blockId} className="space-y-2">
+              <VideoPlayer
+                videoUrl={item.videoUrl}
+                thumbnail={item.thumbnail ?? undefined}
+                duration={item.duration ?? undefined}
+                attachmentId={item.attachmentId ?? undefined}
+                isPlaceholder={item.isPlaceholder}
+                progress={item.progress}
+              />
+              {/* Show progress message if available */}
+              {item.isPlaceholder && item.message && (
+                <div className="text-xs text-text-muted">{item.message}</div>
+              )}
+            </div>
+          )
+        } else if (item.type === 'image') {
+          // Render image block using ImageGallery component
+          return (
+            <div key={item.blockId} className="space-y-2">
+              {item.isPlaceholder ? (
+                // Show loading state for placeholder images
+                <div className="flex items-center gap-3 p-4 rounded-lg bg-surface border border-border">
+                  <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center">
+                    <div className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-sm font-medium text-text-primary">
+                      {t('image.generating') || 'Generating images...'}
+                    </div>
+                    {item.message && (
+                      <div className="text-xs text-text-muted mt-1">{item.message}</div>
+                    )}
+                  </div>
+                </div>
+              ) : item.imageUrls && item.imageUrls.length > 0 ? (
+                // Show generated images
+                <ImageGallery
+                  images={item.imageUrls.map((url: string, i: number) => ({
+                    url,
+                    attachmentId: item.imageAttachmentIds?.[i],
+                  }))}
+                />
+              ) : null}
             </div>
           )
         } else if (item.type === 'tool') {

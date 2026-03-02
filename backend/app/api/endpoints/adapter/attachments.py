@@ -13,7 +13,7 @@ from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
@@ -199,7 +199,7 @@ async def upload_attachment(
     file: UploadFile = File(...),
     overwrite_attachment_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(security.get_current_user),
+    current_user: User = Depends(security.get_current_user_jwt_apikey_tasktoken),
 ):
     """
     Upload a document file for chat attachment.
@@ -440,6 +440,18 @@ async def download_attachment(
     if not has_access:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
+    # Check if attachment has an external URL (e.g., generated video)
+    # For such attachments, redirect to the external URL instead of serving binary data
+    if context.type_data and isinstance(context.type_data, dict):
+        video_metadata = context.type_data.get("video_metadata")
+        if video_metadata and isinstance(video_metadata, dict):
+            video_url = video_metadata.get("video_url")
+            if video_url:
+                logger.info(
+                    f"Redirecting attachment {attachment_id} to external video URL"
+                )
+                return RedirectResponse(url=video_url, status_code=302)
+
     # Get binary data from the appropriate storage backend
     binary_data = context_service.get_attachment_binary_data(
         db=db,
@@ -473,17 +485,18 @@ async def download_attachment(
 async def executor_download_attachment(
     attachment_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(security.get_current_user_flexible_for_executor),
+    current_user: User = Depends(security.get_current_user_jwt_apikey_tasktoken),
 ):
     """
     Download attachment for executor.
 
     This endpoint is called by the Executor to download attachments
-    to the workspace. It supports both JWT Token and API Key authentication.
+    to the workspace. It supports multiple authentication methods.
 
     Authentication:
     - JWT Token: Standard Bearer token in Authorization header
     - API Key: Personal API key (wg-xxx) via X-API-Key header or Bearer token
+    - Task Token: JWT token issued for task execution
 
     Returns:
         File binary data with appropriate content type
@@ -607,7 +620,7 @@ async def get_attachment_by_subtask(
 async def get_all_task_attachments(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(security.get_current_user_flexible_for_executor),
+    current_user: User = Depends(security.get_current_user_jwt_apikey_tasktoken),
 ):
     """
     Get all attachments for a task (across all subtasks).
@@ -615,7 +628,10 @@ async def get_all_task_attachments(
     This endpoint is used by the executor to pre-download all attachments
     for a task at sandbox startup.
 
-    Supports both JWT token and API Key authentication.
+    Supports multiple authentication methods:
+    - JWT Token: Standard Bearer token in Authorization header
+    - API Key: Personal API key (wg-xxx) via X-API-Key header or Bearer token
+    - Task Token: JWT token issued for task execution
 
     Args:
         task_id: Task ID
