@@ -158,7 +158,12 @@ def _handle_device_disconnect(user_id: int, device_id: str) -> list[FailedSubtas
 
 
 def _register_device(
-    user_id: int, device_id: str, name: str, client_ip: Optional[str] = None
+    user_id: int,
+    device_id: str,
+    name: str,
+    client_ip: Optional[str] = None,
+    device_type: Optional[str] = None,
+    bind_shell: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """
     Register or update device CRD in database.
@@ -168,6 +173,8 @@ def _register_device(
         device_id: Device unique identifier (stored in Kind.name)
         name: Device display name
         client_ip: Device's client IP address
+        device_type: Device type ('local' or 'cloud')
+        bind_shell: Shell runtime binding ('claudecode' or 'openclaw')
 
     Returns (success, error_message).
     """
@@ -179,6 +186,8 @@ def _register_device(
                 device_id=device_id,
                 name=name,
                 client_ip=client_ip,
+                device_type=device_type,
+                bind_shell=bind_shell,
             )
         return True, None
     except Exception as e:
@@ -651,7 +660,12 @@ class DeviceNamespace(socketio.AsyncNamespace):
         # Pass client_ip to _register_device for tracking
         if not is_cloud_device:
             success, error = _register_device(
-                user_id, payload.device_id, payload.name, payload.client_ip
+                user_id,
+                payload.device_id,
+                payload.name,
+                payload.client_ip,
+                device_type=payload.device_type.value,
+                bind_shell=payload.bind_shell.value,
             )
             if not success:
                 return {"error": f"Registration failed: {error}"}
@@ -665,8 +679,9 @@ class DeviceNamespace(socketio.AsyncNamespace):
             executor_version=payload.executor_version,
         )
 
-        # Update session with device_id
+        # Update session with device_id and device_name
         session["device_id"] = payload.device_id
+        session["device_name"] = payload.name
         session["registered"] = True
         await self.save_session(sid, session)
 
@@ -712,12 +727,29 @@ class DeviceNamespace(socketio.AsyncNamespace):
             return {"error": "Device ID mismatch"}
 
         # Refresh Redis TTL and update running_task_ids
-        await device_service.refresh_device_heartbeat(
+        success = await device_service.refresh_device_heartbeat(
             user_id,
             payload.device_id,
             payload.running_task_ids,
             payload.executor_version,
         )
+
+        if not success:
+            # Redis key expired, recreate it to recover from ghost-offline state
+            device_name = session.get("device_name", f"device-{payload.device_id[:8]}")
+            logger.warning(
+                f"[Device WS] Heartbeat recovery: recreating Redis key for "
+                f"user={user_id}, device={payload.device_id}"
+            )
+            await device_service.set_device_online(
+                user_id=user_id,
+                device_id=payload.device_id,
+                socket_id=sid,
+                name=device_name,
+                executor_version=payload.executor_version,
+            )
+            # Re-broadcast device online event
+            await self._broadcast_device_online(user_id, payload.device_id, device_name)
 
         # Database operation: quick in, quick out
         _update_device_heartbeat(user_id, payload.device_id)

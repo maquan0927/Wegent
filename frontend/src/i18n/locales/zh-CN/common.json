@@ -304,6 +304,10 @@
       "join_description_suffix": "」将添加到您的智能体列表中，您可以使用该智能体创建和执行任务。"
     }
   },
+  "teamSelector": {
+    "agent_label": "智能体",
+    "select_agent_tooltip": "选择智能体"
+  },
   "team": {
     "name": "名称",
     "name_required": "智能体名称不能为空",
@@ -917,6 +921,17 @@
     "model_category_type_video": "视频生成",
     "model_category_type_image": "图片生成",
     "image_config_title": "图片生成配置",
+    "image_size": "图像尺寸",
+    "image_size_hint": "生成图像的分辨率",
+    "image_max_images": "最大生成图片数",
+    "image_max_images_hint": "单次请求最多生成的图片数量",
+    "image_max_reference_images": "最大参考图数",
+    "image_max_reference_images_hint": "用户单次上传的最大参考图片数量",
+    "image_response_format": "响应格式",
+    "image_response_format_hint": "URL 返回图片链接，Base64 返回编码数据",
+    "image_output_format": "输出格式",
+    "image_watermark": "水印",
+    "image_watermark_hint": "是否在生成的图片上添加水印",
     "video_config_title": "视频生成配置",
     "video_resolution": "默认分辨率",
     "video_ratio": "默认宽高比",
@@ -1269,6 +1284,7 @@
     "no_matching_skills": "没有匹配的技能",
     "already_selected": "已选择",
     "skill_button_tooltip": "选择要在此消息中使用的技能",
+    "skill_button_label": "技能",
     "manage_skills": "管理技能"
   },
   "mcpProviders": {
