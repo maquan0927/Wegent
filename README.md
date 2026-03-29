@@ -303,17 +303,17 @@ Thanks to the following developers for their contributions and efforts to make t
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/icycrystal4">
-            <img src="https://avatars.githubusercontent.com/u/946207?v=4" width="80;" alt="icycrystal4"/>
-            <br />
-            <sub><b>Icycrystal4</b></sub>
-        </a>
-    </td>
-    <td align="center">
         <a href="https://github.com/moqimoqidea">
             <img src="https://avatars.githubusercontent.com/u/39821951?v=4" width="80;" alt="moqimoqidea"/>
             <br />
             <sub><b>Moqimoqidea</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/icycrystal4">
+            <img src="https://avatars.githubusercontent.com/u/946207?v=4" width="80;" alt="icycrystal4"/>
+            <br />
+            <sub><b>Icycrystal4</b></sub>
         </a>
     </td>
     <td align="center">
@@ -455,7 +455,7 @@ Thanks to the following developers for their contributions and efforts to make t
         <a href="https://github.com/wxcfox">
             <img src="https://avatars.githubusercontent.com/u/33141411?v=4" width="80;" alt="wxcfox"/>
             <br />
-            <sub><b>wxcfox</b></sub>
+            <sub><b>Wxcfox</b></sub>
         </a>
     </td></tr>
 </table>
